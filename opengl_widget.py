@@ -1,5 +1,4 @@
-import sys
-from PyQt5.QtWidgets import QApplication, QMainWindow, QOpenGLWidget, QFileDialog, QPushButton, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QOpenGLWidget
 from PyQt5.QtCore import Qt
 from OpenGL.GL import *
 from OpenGL.GLU import *
@@ -10,7 +9,10 @@ class OpenGLWidget(QOpenGLWidget):
     def __init__(self, parent=None):
         super(OpenGLWidget, self).__init__(parent)
         self.mesh = None
-        self.angle = 0
+        self.angle_x = 0
+        self.angle_y = 0
+        self.zoom = 1.0
+        self.last_mouse_pos = None
         self.vertices = None
         self.indices = None
 
@@ -48,13 +50,14 @@ class OpenGLWidget(QOpenGLWidget):
         gluPerspective(45.0, w / h, 0.1, 100.0)
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
-        gluLookAt(0, 0, 3, 0, 0, 0, 0, 1, 0)
+        gluLookAt(0, 0, 3 / self.zoom, 0, 0, 0, 0, 1, 0)
 
     def paintGL(self):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glLoadIdentity()
-        gluLookAt(0, 0, 3, 0, 0, 0, 0, 1, 0)
-        glRotatef(self.angle, 0, 1, 0)
+        gluLookAt(0, 0, 3 / self.zoom, 0, 0, 0, 0, 1, 0)
+        glRotatef(self.angle_x, 1, 0, 0)
+        glRotatef(self.angle_y, 0, 1, 0)
         
         if self.mesh:
             # Отрисовка модели
@@ -65,43 +68,20 @@ class OpenGLWidget(QOpenGLWidget):
             glDisableClientState(GL_VERTEX_ARRAY)
             glDisable(GL_LIGHTING)
 
-    def set_angle(self, angle):
-        self.angle = angle
+    def mousePressEvent(self, event):
+        self.last_mouse_pos = event.pos()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.LeftButton:
+            dx = event.x() - self.last_mouse_pos.x()
+            dy = event.y() - self.last_mouse_pos.y()
+            self.angle_x += dy
+            self.angle_y += dx
+            self.last_mouse_pos = event.pos()
+            self.update()
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y() / 120  # Количество шагов прокрутки (обычно 120 шагов)
+        self.zoom *= 1.1 ** delta
+        self.resizeGL(self.width(), self.height())
         self.update()
-
-class MainWindow(QMainWindow):
-    def __init__(self):
-        super(MainWindow, self).__init__()
-        
-        self.glWidget = OpenGLWidget(self)
-        self.initUI()
-
-    def initUI(self):
-        self.setWindowTitle('3D Viewer')
-        central_widget = QWidget(self)
-        self.setCentralWidget(central_widget)
-        
-        layout = QVBoxLayout(central_widget)
-        layout.addWidget(self.glWidget)
-        
-        load_button = QPushButton('Load OBJ', self)
-        load_button.clicked.connect(self.open_file_dialog)
-        layout.addWidget(load_button)
-
-    def open_file_dialog(self):
-        options = QFileDialog.Options()
-        file_path, _ = QFileDialog.getOpenFileName(self, "Open OBJ File", "", "OBJ Files (*.obj);;All Files (*)", options=options)
-        if file_path:
-            self.glWidget.load_mesh(file_path)
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Left:
-            self.glWidget.set_angle(self.glWidget.angle - 5)
-        elif event.key() == Qt.Key_Right:
-            self.glWidget.set_angle(self.glWidget.angle + 5)
-
-if __name__ == '__main__':
-    app = QApplication(sys.argv)
-    mainWindow = MainWindow()
-    mainWindow.show()
-    sys.exit(app.exec_())
