@@ -1,4 +1,5 @@
 from PyQt5.QtWidgets import QMainWindow, QPushButton, QVBoxLayout, QWidget, QFileDialog
+from PyQt5.QtCore import Qt  # Добавляем импорт
 from opengl_widget import OpenGLWidget
 
 class MainWindow(QMainWindow):
