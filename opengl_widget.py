@@ -222,17 +222,21 @@ class OpenGLWidget(QOpenGLWidget):
             raise RuntimeError("Failed to import FBX file.")
 
         importer.Destroy()
-        combined_vertices, combined_indices, combined_normals = self.process_fbx_scene(scene)
+        combined_vertices, combined_indices, combined_normals, combined_texcoords = self.process_fbx_scene(scene)
         manager.Destroy()
         self.vertices, self.indices, self.normals = self.process_mesh_data(
             combined_vertices, combined_indices, combined_normals
         )
+        self.texcoords = np.array(combined_texcoords, dtype=np.float32)
+        if self.texcoords.ndim != 2 or self.texcoords.shape[1] != 2:
+            self.texcoords = np.array([], dtype=np.float32)
+        self._load_texture_for_fbx(file_path)
 
     def process_fbx_scene(self, scene):
         combined_vertices = []
         combined_indices = []
         combined_normals = []
-        vertex_offset = 0
+        combined_texcoords = []
         mesh_attr_type = _get_fbx_mesh_attr_type()
 
         node_count = scene.GetNodeCount()
@@ -247,9 +251,7 @@ class OpenGLWidget(QOpenGLWidget):
 
             mesh = node.GetMesh()
             control_points = mesh.GetControlPoints()
-            local_vertices = [[p[0], p[1], p[2]] for p in control_points]
-            local_normals = [[0.0, 0.0, 0.0] for _ in local_vertices]
-            local_indices = []
+            uv_set_name = self._get_fbx_uv_set_name(mesh)
 
             for j in range(mesh.GetPolygonCount()):
                 poly_size = mesh.GetPolygonSize(j)
@@ -258,30 +260,37 @@ class OpenGLWidget(QOpenGLWidget):
                     continue
 
                 for k in range(1, poly_size - 1):
-                    tri = (polygon[0], polygon[k], polygon[k + 1])
-                    local_indices.extend(tri)
+                    tri_slots = (0, k, k + 1)
 
-                    v0 = np.array(local_vertices[tri[0]], dtype=np.float32)
-                    v1 = np.array(local_vertices[tri[1]], dtype=np.float32)
-                    v2 = np.array(local_vertices[tri[2]], dtype=np.float32)
-                    normal = np.cross(v1 - v0, v2 - v0)
+                    tri_positions = []
+                    for slot in tri_slots:
+                        cp_index = polygon[slot]
+                        cp = control_points[cp_index]
+                        tri_positions.append(np.array([cp[0], cp[1], cp[2]], dtype=np.float32))
 
-                    for idx in tri:
-                        local_normals[idx][0] += float(normal[0])
-                        local_normals[idx][1] += float(normal[1])
-                        local_normals[idx][2] += float(normal[2])
+                    face_normal = np.cross(tri_positions[1] - tri_positions[0], tri_positions[2] - tri_positions[0])
+                    face_len = np.linalg.norm(face_normal)
+                    if face_len > 0:
+                        face_normal /= face_len
 
-            local_normals_np = np.array(local_normals, dtype=np.float32)
-            lengths = np.linalg.norm(local_normals_np, axis=1)
-            valid = lengths > 0
-            local_normals_np[valid] /= lengths[valid][:, None]
+                    for slot in tri_slots:
+                        cp_index = polygon[slot]
+                        cp = control_points[cp_index]
 
-            combined_vertices.extend(local_vertices)
-            combined_normals.extend(local_normals_np.tolist())
-            combined_indices.extend((np.array(local_indices, dtype=np.uint32) + vertex_offset).tolist())
-            vertex_offset += len(local_vertices)
+                        normal = self._get_fbx_vertex_normal(mesh, j, slot)
+                        if normal is None:
+                            normal = [float(face_normal[0]), float(face_normal[1]), float(face_normal[2])]
 
-        return combined_vertices, combined_indices, combined_normals
+                        uv = self._get_fbx_polygon_vertex_uv(mesh, j, slot, uv_set_name)
+                        if uv is None:
+                            uv = (0.0, 0.0)
+
+                        combined_vertices.append([float(cp[0]), float(cp[1]), float(cp[2])])
+                        combined_normals.append([float(normal[0]), float(normal[1]), float(normal[2])])
+                        combined_texcoords.append([float(uv[0]), float(uv[1])])
+                        combined_indices.append(len(combined_vertices) - 1)
+
+        return combined_vertices, combined_indices, combined_normals, combined_texcoords
 
     def process_mesh_data(self, vertices, indices, normals):
         vertices = np.array(vertices, dtype=np.float32)
@@ -451,6 +460,52 @@ class OpenGLWidget(QOpenGLWidget):
             return np.array([], dtype=np.float32)
         return uv_arr[:, :2]
 
+    def _get_fbx_uv_set_name(self, mesh):
+        if fbx is None:
+            return None
+        try:
+            uv_names = fbx.FbxStringList()
+            mesh.GetUVSetNames(uv_names)
+            if uv_names.GetCount() > 0:
+                return uv_names.GetStringAt(0)
+        except Exception:
+            return None
+        return None
+
+    def _get_fbx_vertex_normal(self, mesh, polygon_index, vertex_index):
+        try:
+            normal = mesh.GetPolygonVertexNormal(polygon_index, vertex_index)
+            if normal is not None and len(normal) >= 3:
+                return [normal[0], normal[1], normal[2]]
+        except Exception:
+            return None
+        return None
+
+    def _get_fbx_polygon_vertex_uv(self, mesh, polygon_index, vertex_index, uv_set_name):
+        if uv_set_name is None:
+            return None
+
+        try:
+            uv = fbx.FbxVector2()
+            mesh.GetPolygonVertexUV(polygon_index, vertex_index, uv_set_name, uv)
+            return float(uv[0]), float(uv[1])
+        except Exception:
+            pass
+
+        try:
+            result = mesh.GetPolygonVertexUV(polygon_index, vertex_index, uv_set_name)
+            if isinstance(result, (tuple, list)):
+                if len(result) >= 2 and isinstance(result[1], fbx.FbxVector2):
+                    uv = result[1]
+                    return float(uv[0]), float(uv[1])
+                if len(result) >= 2 and all(isinstance(v, (int, float)) for v in result[:2]):
+                    return float(result[0]), float(result[1])
+            if result is not None and hasattr(result, "__getitem__"):
+                return float(result[0]), float(result[1])
+        except Exception:
+            return None
+        return None
+
     def _load_texture_from_mesh_or_folder(self, mesh, file_path: str):
         material = getattr(mesh.visual, "material", None)
         image = getattr(material, "image", None) if material is not None else None
@@ -458,6 +513,21 @@ class OpenGLWidget(QOpenGLWidget):
             self._upload_texture_image(image)
             return
 
+        if Image is None:
+            return
+
+        candidates = self._find_texture_candidates(file_path)
+        for candidate in candidates:
+            try:
+                img = Image.open(candidate)
+                self._upload_texture_image(img)
+                return
+            except Exception:
+                continue
+
+    def _load_texture_for_fbx(self, file_path: str):
+        if self.texcoords.size == 0:
+            return
         if Image is None:
             return
 
