@@ -5,7 +5,13 @@ import numpy as np
 import trimesh
 
 from viewer.utils.geometry_utils import process_mesh_data
-from viewer.utils.texture_utils import find_texture_candidates, rank_texture_candidates, resolve_texture_path
+from viewer.utils.texture_utils import (
+    CHANNEL_BASECOLOR,
+    find_texture_candidates,
+    group_texture_candidates,
+    rank_texture_candidates,
+    resolve_texture_path,
+)
 
 try:
     import fbx
@@ -20,6 +26,7 @@ class MeshPayload:
     normals: np.ndarray
     texcoords: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float32))
     texture_candidates: list = field(default_factory=list)
+    texture_sets: dict = field(default_factory=dict)
     debug_info: dict = field(default_factory=dict)
 
 
@@ -36,12 +43,14 @@ def _load_trimesh_payload(file_path: str) -> MeshPayload:
             mesh = next(iter(scene_or_mesh.geometry.values()))
             vertices, indices, normals = process_mesh_data(mesh.vertices, mesh.faces, [])
             texcoords = _extract_trimesh_uv(mesh)
+            texture_candidates = find_texture_candidates(file_path)
             return MeshPayload(
                 vertices=vertices,
                 indices=indices,
                 normals=normals,
                 texcoords=texcoords,
-                texture_candidates=find_texture_candidates(file_path),
+                texture_candidates=texture_candidates,
+                texture_sets=group_texture_candidates(texture_candidates),
                 debug_info={"loader": "trimesh_scene_single", "uv_count": int(texcoords.shape[0]) if texcoords.ndim == 2 else 0},
             )
 
@@ -56,12 +65,14 @@ def _load_trimesh_payload(file_path: str) -> MeshPayload:
 
     vertices, indices, normals = process_mesh_data(scene_or_mesh.vertices, scene_or_mesh.faces, [])
     texcoords = _extract_trimesh_uv(scene_or_mesh)
+    texture_candidates = find_texture_candidates(file_path)
     return MeshPayload(
         vertices=vertices,
         indices=indices,
         normals=normals,
         texcoords=texcoords,
-        texture_candidates=find_texture_candidates(file_path),
+        texture_candidates=texture_candidates,
+        texture_sets=group_texture_candidates(texture_candidates),
         debug_info={"loader": "trimesh_mesh", "uv_count": int(texcoords.shape[0]) if texcoords.ndim == 2 else 0},
     )
 
@@ -110,6 +121,9 @@ def _load_fbx_payload(file_path: str) -> MeshPayload:
     texture_candidates = _collect_fbx_material_textures(scene, file_path)
     if not texture_candidates:
         texture_candidates = find_texture_candidates(file_path)
+    texture_sets = group_texture_candidates(texture_candidates)
+    if not texture_sets.get(CHANNEL_BASECOLOR):
+        texture_sets[CHANNEL_BASECOLOR] = texture_candidates[:1]
 
     manager.Destroy()
     return MeshPayload(
@@ -118,6 +132,7 @@ def _load_fbx_payload(file_path: str) -> MeshPayload:
         normals=normals,
         texcoords=texcoords,
         texture_candidates=texture_candidates,
+        texture_sets=texture_sets,
         debug_info={
             "loader": "fbx",
             "uv_count": int(texcoords.shape[0]) if texcoords.ndim == 2 else 0,
@@ -184,6 +199,8 @@ def _parse_fbx_scene(scene):
                         normal = [float(face_normal[0]), float(face_normal[1]), float(face_normal[2])]
 
                     uv = _get_fbx_polygon_vertex_uv(mesh, j, slot, uv_set_name)
+                    if uv is None:
+                        uv = _get_fbx_polygon_vertex_uv_fallback(mesh, j, slot, cp_index)
                     if uv is None:
                         uv = (0.0, 0.0)
                         uv_missing_count += 1
@@ -279,13 +296,26 @@ def _get_fbx_mesh_attr_type():
 
 
 def _get_fbx_uv_set_name(mesh):
+    # SDK variants differ on GetUVSetNames signature; use LayerElementUV name first.
     try:
-        uv_names = fbx.FbxStringList()
-        mesh.GetUVSetNames(uv_names)
-        if uv_names.GetCount() > 0:
-            return uv_names.GetStringAt(0)
+        if mesh.GetElementUVCount() > 0:
+            elem = mesh.GetElementUV(0)
+            if elem is not None:
+                name = elem.GetName()
+                if name:
+                    return str(name)
     except Exception:
-        return None
+        pass
+
+    try:
+        # Some bindings expose list-returning overload.
+        names = mesh.GetUVSetNames()
+        if names:
+            first = names[0]
+            if first:
+                return str(first)
+    except Exception:
+        pass
     return None
 
 
@@ -322,3 +352,62 @@ def _get_fbx_polygon_vertex_uv(mesh, polygon_index, vertex_index, uv_set_name):
     except Exception:
         return None
     return None
+
+
+def _get_fbx_polygon_vertex_uv_fallback(mesh, polygon_index, vertex_index, cp_index):
+    # Fallback path for FBX files with unnamed UV set.
+    try:
+        uv_idx = mesh.GetTextureUVIndex(polygon_index, vertex_index)
+        if uv_idx is not None and uv_idx >= 0:
+            uv = mesh.GetTextureUV(uv_idx)
+            if uv is not None and len(uv) >= 2:
+                return float(uv[0]), float(uv[1])
+    except Exception:
+        pass
+
+    try:
+        if mesh.GetElementUVCount() <= 0:
+            return None
+        uv_elem = mesh.GetElementUV(0)
+        if uv_elem is None:
+            return None
+
+        mapping = uv_elem.GetMappingMode()
+        reference = uv_elem.GetReferenceMode()
+        direct = uv_elem.GetDirectArray()
+        index_arr = uv_elem.GetIndexArray()
+
+        map_enum = getattr(getattr(fbx, "FbxLayerElement", object), "EMappingMode", None)
+        ref_enum = getattr(getattr(fbx, "FbxLayerElement", object), "EReferenceMode", None)
+        if map_enum is None or ref_enum is None:
+            return None
+
+        if mapping == map_enum.eByControlPoint:
+            map_index = cp_index
+        elif mapping == map_enum.eByPolygonVertex:
+            map_index = mesh.GetTextureUVIndex(polygon_index, vertex_index)
+        elif mapping == map_enum.eByPolygon:
+            map_index = polygon_index
+        elif mapping == map_enum.eAllSame:
+            map_index = 0
+        else:
+            return None
+
+        if map_index is None or map_index < 0:
+            return None
+
+        if reference == ref_enum.eDirect:
+            direct_index = map_index
+        elif reference in (ref_enum.eIndex, ref_enum.eIndexToDirect):
+            if map_index >= index_arr.GetCount():
+                return None
+            direct_index = index_arr.GetAt(map_index)
+        else:
+            return None
+
+        if direct_index < 0 or direct_index >= direct.GetCount():
+            return None
+        uv = direct.GetAt(direct_index)
+        return float(uv[0]), float(uv[1])
+    except Exception:
+        return None

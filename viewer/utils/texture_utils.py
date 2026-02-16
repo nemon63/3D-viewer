@@ -3,6 +3,12 @@ import os
 
 TEXTURE_EXTS = (".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff")
 
+CHANNEL_BASECOLOR = "basecolor"
+CHANNEL_METAL = "metal"
+CHANNEL_ROUGHNESS = "roughness"
+CHANNEL_NORMAL = "normal"
+CHANNEL_OTHER = "other"
+
 
 def rank_texture_candidates(candidates, model_name=""):
     def score(path):
@@ -51,6 +57,32 @@ def rank_texture_candidates(candidates, model_name=""):
         seen.add(key)
         dedup.append(item)
     return dedup
+
+
+def classify_texture_channel(path: str) -> str:
+    name = os.path.basename(path).lower()
+    if any(token in name for token in ("normal", "_nrm", "_nor", "_nm", "normalmap")):
+        return CHANNEL_NORMAL
+    if any(token in name for token in ("rough", "_rgh", "_roughness", "gloss", "_gls")):
+        return CHANNEL_ROUGHNESS
+    if any(token in name for token in ("metal", "_met", "_metallic", "metalness")):
+        return CHANNEL_METAL
+    if any(token in name for token in ("dif", "diff", "diffuse", "albedo", "basecolor", "base_color", "color", "col")):
+        return CHANNEL_BASECOLOR
+    return CHANNEL_OTHER
+
+
+def group_texture_candidates(candidates):
+    grouped = {
+        CHANNEL_BASECOLOR: [],
+        CHANNEL_METAL: [],
+        CHANNEL_ROUGHNESS: [],
+        CHANNEL_NORMAL: [],
+        CHANNEL_OTHER: [],
+    }
+    for path in candidates:
+        grouped[classify_texture_channel(path)].append(path)
+    return grouped
 
 
 def find_texture_candidates(model_path):

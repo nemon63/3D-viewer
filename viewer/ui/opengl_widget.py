@@ -1,4 +1,5 @@
 import numpy as np
+import os
 from PyQt5.QtCore import QPoint, Qt
 from PyQt5.QtWidgets import QOpenGLWidget
 from OpenGL.GL import (
@@ -93,6 +94,7 @@ class OpenGLWidget(QOpenGLWidget):
         self.texcoords = np.array([], dtype=np.float32)
         self.texture_id = 0
         self.last_texture_path = ""
+        self.last_texture_sets = {}
         self.last_debug_info = {}
         self.last_error = ""
 
@@ -136,11 +138,12 @@ class OpenGLWidget(QOpenGLWidget):
             self.indices = payload.indices
             self.normals = payload.normals
             self.texcoords = payload.texcoords
+            self.last_texture_sets = payload.texture_sets or {}
             self.last_debug_info = payload.debug_info or {}
             self.last_texture_path = ""
 
             if self.texcoords.size > 0:
-                self._load_first_texture(payload.texture_candidates)
+                self._load_default_texture(payload.texture_candidates)
 
             if self.vertices.size == 0 or self.indices.size == 0:
                 raise RuntimeError("Model does not contain valid geometry.")
@@ -154,6 +157,7 @@ class OpenGLWidget(QOpenGLWidget):
             self.normals = np.array([], dtype=np.float32)
             self.texcoords = np.array([], dtype=np.float32)
             self.last_texture_path = ""
+            self.last_texture_sets = {}
             self.last_debug_info = {}
             self.last_error = str(exc)
             self.update()
@@ -286,17 +290,30 @@ class OpenGLWidget(QOpenGLWidget):
         self.angle_y = angle_y
         self.update()
 
+    def _load_default_texture(self, texture_candidates):
+        basecolor_candidates = self.last_texture_sets.get("basecolor", [])
+        if basecolor_candidates and self.apply_texture_path(basecolor_candidates[0]):
+            return
+        self._load_first_texture(texture_candidates)
+
     def _load_first_texture(self, texture_candidates):
         if Image is None:
             return
         for path in texture_candidates:
-            try:
-                with Image.open(path) as img:
-                    self._upload_texture_image(img.copy())
-                self.last_texture_path = path
+            if self.apply_texture_path(path):
                 return
-            except Exception:
-                continue
+
+    def apply_texture_path(self, path: str) -> bool:
+        if Image is None or not path or not os.path.isfile(path):
+            return False
+        try:
+            with Image.open(path) as img:
+                self._upload_texture_image(img.copy())
+            self.last_texture_path = path
+            self.update()
+            return True
+        except Exception:
+            return False
 
     def _upload_texture_image(self, image):
         if image is None:

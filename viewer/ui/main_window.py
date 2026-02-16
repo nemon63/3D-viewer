@@ -1,7 +1,10 @@
 import os
 from PyQt5.QtCore import QSettings, Qt
 from PyQt5.QtWidgets import (
+    QComboBox,
     QFileDialog,
+    QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -22,7 +25,15 @@ class MainWindow(QMainWindow):
         self.settings = QSettings("3d-viewer", "model-browser")
         self.current_directory = ""
         self.model_files = []
+        self.current_file_path = ""
         self.model_extensions = (".obj", ".fbx", ".stl", ".ply", ".glb", ".gltf", ".off", ".dae")
+        self.material_channels = [
+            ("basecolor", "BaseColor/Diffuse"),
+            ("metal", "Metal"),
+            ("roughness", "Roughness"),
+            ("normal", "Normal"),
+        ]
+        self.material_boxes = {}
         self.init_ui()
         self._restore_last_directory()
 
@@ -64,6 +75,25 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Выбери папку с моделями")
         self.status_label.setWordWrap(True)
         panel_layout.addWidget(self.status_label)
+
+        material_group = QGroupBox("Материалы", self)
+        material_layout = QFormLayout(material_group)
+        for channel, title in self.material_channels:
+            combo = QComboBox(self)
+            combo.addItem("Нет", "")
+            combo.currentIndexChanged.connect(lambda _idx, ch=channel: self._on_material_channel_changed(ch))
+            self.material_boxes[channel] = combo
+            material_layout.addRow(title, combo)
+
+        self.preview_channel_combo = QComboBox(self)
+        for channel, title in self.material_channels:
+            self.preview_channel_combo.addItem(title, channel)
+        material_layout.addRow("Показать канал", self.preview_channel_combo)
+
+        apply_preview_button = QPushButton("Показать карту канала", self)
+        apply_preview_button.clicked.connect(self._apply_preview_channel)
+        material_layout.addRow(apply_preview_button)
+        panel_layout.addWidget(material_group)
 
         root_layout.addWidget(browser_panel)
         root_layout.addWidget(self.gl_widget, stretch=1)
@@ -120,18 +150,12 @@ class MainWindow(QMainWindow):
         file_path = self.model_files[row]
         loaded = self.gl_widget.load_mesh(file_path)
         if loaded:
-            debug = self.gl_widget.last_debug_info or {}
-            uv_count = debug.get("uv_count", 0)
-            tex_count = debug.get("texture_candidates_count", 0)
-            tex_file = os.path.basename(self.gl_widget.last_texture_path) if self.gl_widget.last_texture_path else "не выбрана"
-            preview = "unlit" if self.gl_widget.unlit_texture_preview else "lit"
-            self.status_label.setText(
-                f"Открыт: {os.path.basename(file_path)} ({row + 1}/{len(self.model_files)}) | "
-                f"UV: {uv_count} | Текстур-кандидатов: {tex_count} | Текстура: {tex_file} | {preview}"
-            )
+            self.current_file_path = file_path
+            self._populate_material_controls(self.gl_widget.last_texture_sets)
+            self._update_status(row)
             self.setWindowTitle(f"3D Viewer - {os.path.basename(file_path)}")
             if file_path.lower().endswith(".fbx"):
-                print("[FBX DEBUG]", debug)
+                print("[FBX DEBUG]", self.gl_widget.last_debug_info or {})
                 print("[FBX DEBUG] selected_texture:", self.gl_widget.last_texture_path or "<none>")
         else:
             self.status_label.setText(f"Ошибка: {self.gl_widget.last_error}")
@@ -186,3 +210,50 @@ class MainWindow(QMainWindow):
             return
 
         super().keyPressEvent(event)
+
+    def _populate_material_controls(self, texture_sets):
+        for channel, _title in self.material_channels:
+            combo = self.material_boxes[channel]
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("Нет", "")
+            for path in texture_sets.get(channel, []):
+                combo.addItem(os.path.basename(path), path)
+            if channel == "basecolor" and combo.count() > 1:
+                current_tex = self.gl_widget.last_texture_path
+                matched = combo.findData(current_tex)
+                combo.setCurrentIndex(matched if matched >= 0 else 1)
+            else:
+                combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+
+    def _on_material_channel_changed(self, channel):
+        if channel == "basecolor":
+            self._apply_channel_texture("basecolor")
+
+    def _apply_preview_channel(self):
+        channel = self.preview_channel_combo.currentData()
+        self._apply_channel_texture(channel)
+
+    def _apply_channel_texture(self, channel):
+        combo = self.material_boxes.get(channel)
+        if combo is None:
+            return
+        path = combo.currentData()
+        if path:
+            self.gl_widget.apply_texture_path(path)
+            self._update_status(self.model_list.currentRow())
+
+    def _update_status(self, row):
+        if row < 0 or row >= len(self.model_files):
+            return
+        file_path = self.model_files[row]
+        debug = self.gl_widget.last_debug_info or {}
+        uv_count = debug.get("uv_count", 0)
+        tex_count = debug.get("texture_candidates_count", 0)
+        tex_file = os.path.basename(self.gl_widget.last_texture_path) if self.gl_widget.last_texture_path else "не выбрана"
+        preview = "unlit" if self.gl_widget.unlit_texture_preview else "lit"
+        self.status_label.setText(
+            f"Открыт: {os.path.basename(file_path)} ({row + 1}/{len(self.model_files)}) | "
+            f"UV: {uv_count} | Текстур-кандидатов: {tex_count} | Текстура: {tex_file} | {preview}"
+        )
