@@ -1,6 +1,7 @@
 import os
 from PyQt5.QtCore import QSettings, Qt
 from PyQt5.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -181,6 +182,11 @@ class MainWindow(QMainWindow):
         light_layout.addRow("Background", self.bg_brightness_slider)
         light_layout.addRow("Background x", self.bg_brightness_label)
 
+        self.shadows_checkbox = QCheckBox("Shadows (Experimental)", self)
+        self.shadows_checkbox.setChecked(False)
+        self.shadows_checkbox.stateChanged.connect(self._on_shadows_toggled)
+        light_layout.addRow(self.shadows_checkbox)
+
         controls_tabs.addTab(light_group, "Свет")
         panel_layout.addWidget(controls_tabs)
 
@@ -194,6 +200,7 @@ class MainWindow(QMainWindow):
         self._on_key_light_changed(self.key_light_slider.value())
         self._on_fill_light_changed(self.fill_light_slider.value())
         self._on_background_brightness_changed(self.bg_brightness_slider.value())
+        self._on_shadows_toggled(Qt.Unchecked)
 
     def _restore_last_directory(self):
         last_directory = self.settings.value("last_directory", "", type=str)
@@ -393,9 +400,10 @@ class MainWindow(QMainWindow):
         tex_file = os.path.basename(self.gl_widget.last_texture_path) if self.gl_widget.last_texture_path else "не выбрана"
         preview = "unlit" if self.gl_widget.unlit_texture_preview else "lit"
         projection = "ortho" if self.gl_widget.projection_mode == "orthographic" else "persp"
+        shadow_state = self.gl_widget.shadow_status_message
         self.status_label.setText(
             f"Открыт: {os.path.basename(file_path)} ({row + 1}/{len(self.model_files)}) | "
-            f"UV: {uv_count} | Текстур-кандидатов: {tex_count} | Текстура: {tex_file} | {preview} | {projection}"
+            f"UV: {uv_count} | Текстур-кандидатов: {tex_count} | Текстура: {tex_file} | {preview} | {projection} | shadows:{shadow_state}"
         )
 
     def _on_alpha_cutoff_changed(self, value: int):
@@ -437,6 +445,15 @@ class MainWindow(QMainWindow):
         brightness = value / 100.0
         self.bg_brightness_label.setText(f"{brightness:.2f}")
         self.gl_widget.set_background_brightness(brightness)
+
+    def _on_shadows_toggled(self, state: int):
+        enabled = state == Qt.Checked
+        active = self.gl_widget.set_shadows_enabled(enabled)
+        if enabled and not active:
+            self.shadows_checkbox.blockSignals(True)
+            self.shadows_checkbox.setChecked(False)
+            self.shadows_checkbox.blockSignals(False)
+        self._update_status(self.model_list.currentRow())
 
     def _sync_projection_combo(self):
         wanted = "orthographic" if self.gl_widget.projection_mode == "orthographic" else "perspective"

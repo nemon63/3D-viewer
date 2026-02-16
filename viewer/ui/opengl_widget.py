@@ -34,7 +34,6 @@ from OpenGL.GL import (
     GL_UNSIGNED_INT,
     GL_VERTEX_SHADER,
     GL_DEPTH_COMPONENT,
-    GL_DEPTH_COMPONENT24,
     GL_FRAMEBUFFER,
     GL_DEPTH_ATTACHMENT,
     GL_FRAMEBUFFER_COMPLETE,
@@ -350,6 +349,8 @@ class OpenGLWidget(QOpenGLWidget):
         self.fill_light_intensity = 10.0
         self.alpha_cutoff = 0.5
         self.enable_ground_shadow = False
+        self.shadow_requested = False
+        self.shadow_status_message = "off"
         self.background_brightness = 1.0
         self.shadow_size = 1024
         self.shadow_fbo = 0
@@ -365,14 +366,9 @@ class OpenGLWidget(QOpenGLWidget):
         glEnable(GL_DEPTH_TEST)
         glClearColor(0.0, 0.0, 0.0, 1.0)
         self._init_shaders()
-        try:
-            self._init_shadow_pipeline()
-        except Exception:
-            # Do not break rendering on unsupported shadow-map path.
-            self.enable_ground_shadow = False
-            self.depth_shader_program = None
-            self.shadow_fbo = 0
-            self.shadow_depth_tex = 0
+        self.shadow_status_message = "off"
+        if self.shadow_requested:
+            self.set_shadows_enabled(True)
 
     def _init_shaders(self):
         self.shader_program = compileProgram(
@@ -431,6 +427,7 @@ class OpenGLWidget(QOpenGLWidget):
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
         if status != GL_FRAMEBUFFER_COMPLETE:
             self.enable_ground_shadow = False
+            self.shadow_status_message = "fbo incomplete"
 
     def load_mesh(self, file_path: str) -> bool:
         try:
@@ -497,6 +494,7 @@ class OpenGLWidget(QOpenGLWidget):
             except Exception:
                 # Runtime fallback for drivers with incomplete depth/FBO behavior.
                 self.enable_ground_shadow = False
+                self.shadow_status_message = "runtime fallback"
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         self._draw_background_gradient()
@@ -649,6 +647,7 @@ class OpenGLWidget(QOpenGLWidget):
         if status != GL_FRAMEBUFFER_COMPLETE:
             glBindFramebuffer(GL_FRAMEBUFFER, int(self.defaultFramebufferObject()))
             self.enable_ground_shadow = False
+            self.shadow_status_message = "fbo incomplete"
             return
         glViewport(0, 0, self.shadow_size, self.shadow_size)
         glClear(GL_DEPTH_BUFFER_BIT)
@@ -853,6 +852,39 @@ class OpenGLWidget(QOpenGLWidget):
     def set_background_brightness(self, value: float):
         self.background_brightness = min(max(value, 0.2), 2.0)
         self.update()
+
+    def set_shadows_enabled(self, enabled: bool):
+        self.shadow_requested = bool(enabled)
+        if not enabled:
+            self.enable_ground_shadow = False
+            self.shadow_status_message = "off"
+            self.update()
+            return False
+
+        if self.context() is None:
+            self.enable_ground_shadow = False
+            self.shadow_status_message = "no context"
+            return False
+
+        self.makeCurrent()
+        try:
+            try:
+                if self.depth_shader_program is None or self.shadow_fbo == 0 or self.shadow_depth_tex == 0:
+                    self._init_shadow_pipeline()
+                if self.depth_shader_program is None or self.shadow_fbo == 0 or self.shadow_depth_tex == 0:
+                    self.enable_ground_shadow = False
+                    self.shadow_status_message = "init failed"
+                    return False
+                self.enable_ground_shadow = True
+                self.shadow_status_message = "on"
+                return True
+            except Exception:
+                self.enable_ground_shadow = False
+                self.shadow_status_message = "unsupported"
+                return False
+        finally:
+            self.doneCurrent()
+            self.update()
 
     def set_alpha_cutoff(self, value: float):
         self.alpha_cutoff = min(max(value, 0.0), 1.0)
