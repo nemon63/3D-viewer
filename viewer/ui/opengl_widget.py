@@ -1,15 +1,18 @@
 import os
 
 import numpy as np
-from PyQt5.QtCore import QPoint, Qt
+from PyQt5.QtCore import QPoint, Qt, QTimer
 from PyQt5.QtWidgets import QOpenGLWidget
 from OpenGL.GL import (
+    GL_BLEND,
     GL_COLOR_BUFFER_BIT,
     GL_DEPTH_BUFFER_BIT,
     GL_DEPTH_TEST,
     GL_FALSE,
     GL_FLOAT,
+    GL_ONE_MINUS_SRC_ALPHA,
     GL_FRAGMENT_SHADER,
+    GL_SRC_ALPHA,
     GL_LINEAR,
     GL_REPEAT,
     GL_RGB,
@@ -24,12 +27,16 @@ from OpenGL.GL import (
     GL_TEXTURE_WRAP_S,
     GL_TEXTURE_WRAP_T,
     GL_TRIANGLES,
+    GL_QUADS,
     GL_UNPACK_ALIGNMENT,
     GL_UNSIGNED_BYTE,
     GL_UNSIGNED_INT,
     GL_VERTEX_SHADER,
     glActiveTexture,
     glBindTexture,
+    glBlendFunc,
+    glColor3f,
+    glColor4f,
     glClear,
     glClearColor,
     glDeleteProgram,
@@ -43,18 +50,26 @@ from OpenGL.GL import (
     glGetUniformLocation,
     glLoadIdentity,
     glMatrixMode,
+    glMultMatrixf,
+    glPopMatrix,
+    glPushMatrix,
     glNormalPointer,
     glPixelStorei,
     glRotatef,
     glTexCoordPointer,
     glTexImage2D,
     glTexParameteri,
+    glTranslatef,
     glUniform1f,
     glUniform1i,
     glUniform3f,
     glUseProgram,
+    glBegin,
+    glEnd,
     glVertexPointer,
+    glVertex3f,
     glViewport,
+    glOrtho,
     GL_MODELVIEW,
     GL_PROJECTION,
     GL_NORMAL_ARRAY,
@@ -117,6 +132,7 @@ uniform int uHasNormal;
 uniform int uUnlitTexturePreview;
 uniform int uUseAlphaCutout;
 uniform float uAlphaCutoff;
+uniform float uAmbientStrength;
 
 float DistributionGGX(vec3 N, vec3 H, float roughness) {
     float a = roughness * roughness;
@@ -200,7 +216,7 @@ void main() {
     Lo += computeLight(N, V, base, metallic, roughness, F0, uLightPosView0, uLightColor0);
     Lo += computeLight(N, V, base, metallic, roughness, F0, uLightPosView1, uLightColor1);
 
-    vec3 ambient = vec3(0.03) * base;
+    vec3 ambient = vec3(uAmbientStrength) * base;
     vec3 color = ambient + Lo;
 
     // Simple filmic tonemap + gamma
@@ -217,7 +233,21 @@ class OpenGLWidget(QOpenGLWidget):
         self.angle_x = 0
         self.angle_y = 0
         self.zoom = 1.0
+        self.zoom_speed = 1.10
+        self.rotate_speed = 1.0
         self.last_mouse_pos = QPoint()
+        self.projection_mode = "perspective"
+        self.model_radius = 1.0
+        self.model_center = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        self.model_translate = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        self.model_target_y = 0.0
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self._orbit_vel_x = 0.0
+        self._orbit_vel_y = 0.0
+        self._inertia_damping = 0.92
+        self._inertia_min_velocity = 0.01
+        self._last_mouse_left_drag = False
 
         self.vertices = np.array([], dtype=np.float32)
         self.indices = np.array([], dtype=np.uint32)
@@ -239,10 +269,20 @@ class OpenGLWidget(QOpenGLWidget):
             [-1.6, 1.0, 1.8],
         ]
         self.light_colors = [
-            [12.0, 12.0, 12.0],
-            [7.0, 7.0, 7.0],
+            [1.0, 0.98, 0.95],
+            [0.75, 0.8, 1.0],
         ]
+        self.ambient_strength = 0.08
+        self.key_light_intensity = 18.0
+        self.fill_light_intensity = 10.0
         self.alpha_cutoff = 0.5
+        self.enable_ground_shadow = True
+        self.shadow_opacity = 0.34
+        self.background_brightness = 1.0
+
+        self._inertia_timer = QTimer(self)
+        self._inertia_timer.setInterval(16)
+        self._inertia_timer.timeout.connect(self._on_inertia_tick)
 
     def initializeGL(self):
         glEnable(GL_DEPTH_TEST)
@@ -266,6 +306,7 @@ class OpenGLWidget(QOpenGLWidget):
             self.last_texture_sets = payload.texture_sets or {}
             self.last_debug_info = payload.debug_info or {}
             self.last_texture_path = ""
+            self._compute_model_bounds()
 
             if self.texcoords.size > 0:
                 self._apply_default_texture_set()
@@ -284,6 +325,9 @@ class OpenGLWidget(QOpenGLWidget):
             self.last_texture_path = ""
             self.last_texture_sets = {}
             self.last_debug_info = {}
+            self.model_center = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+            self.model_translate = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+            self.model_target_y = 0.0
             self.last_error = str(exc)
             self.update()
             return False
@@ -298,28 +342,48 @@ class OpenGLWidget(QOpenGLWidget):
 
     def resizeGL(self, w: int, h: int):
         h = max(h, 1)
+        w = max(w, 1)
         glViewport(0, 0, w, h)
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
-        gluPerspective(45.0, w / h, 0.1, 100.0)
+        aspect = w / h
+        if self.projection_mode == "orthographic":
+            extent = max(0.35, self.model_radius * 1.25) / max(self.zoom, 0.01)
+            glOrtho(-extent * aspect, extent * aspect, -extent, extent, 0.1, 100.0)
+        else:
+            gluPerspective(45.0, aspect, 0.1, 100.0)
 
     def paintGL(self):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        self._draw_background_gradient()
+
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
-        gluLookAt(0, 0, 3 / self.zoom, 0, 0, 0, 0, 1, 0)
+        if self.projection_mode == "orthographic":
+            camera_distance = max(0.3, self.model_radius * 2.2)
+        else:
+            camera_distance = max(0.3, (self.model_radius * 2.8) / max(self.zoom, 0.01))
+        target_y = self.model_target_y + self.pan_y
+        gluLookAt(self.pan_x, target_y, camera_distance, self.pan_x, target_y, 0, 0, 1, 0)
         glRotatef(self.angle_x, 1, 0, 0)
         glRotatef(self.angle_y, 0, 1, 0)
+
+        self._draw_ground_plane()
+        if self.enable_ground_shadow:
+            self._draw_projected_shadow()
 
         if self.vertices.size == 0 or self.indices.size == 0 or self.shader_program is None:
             return
 
+        glPushMatrix()
+        self._apply_model_translation()
         glUseProgram(self.shader_program)
         try:
             self._set_shader_uniforms()
             self._draw_mesh()
         finally:
             glUseProgram(0)
+            glPopMatrix()
 
     def _set_shader_uniforms(self):
         self._set_sampler_uniform("uBaseColorTex", 0)
@@ -339,11 +403,14 @@ class OpenGLWidget(QOpenGLWidget):
         self._set_int_uniform("uUnlitTexturePreview", 1 if self.unlit_texture_preview else 0)
         self._set_int_uniform("uUseAlphaCutout", 1 if self.base_texture_has_alpha else 0)
         self._set_float_uniform("uAlphaCutoff", self.alpha_cutoff)
+        self._set_float_uniform("uAmbientStrength", self.ambient_strength)
 
         self._set_vec3_uniform("uLightPosView0", *self.light_positions[0])
         self._set_vec3_uniform("uLightPosView1", *self.light_positions[1])
-        self._set_vec3_uniform("uLightColor0", *self.light_colors[0])
-        self._set_vec3_uniform("uLightColor1", *self.light_colors[1])
+        key_color = [c * self.key_light_intensity for c in self.light_colors[0]]
+        fill_color = [c * self.fill_light_intensity for c in self.light_colors[1]]
+        self._set_vec3_uniform("uLightColor0", *key_color)
+        self._set_vec3_uniform("uLightColor1", *fill_color)
 
     def _draw_mesh(self):
         glEnableClientState(GL_VERTEX_ARRAY)
@@ -368,6 +435,104 @@ class OpenGLWidget(QOpenGLWidget):
         for unit in (GL_TEXTURE0, GL_TEXTURE1, GL_TEXTURE2, GL_TEXTURE3):
             glActiveTexture(unit)
             glBindTexture(GL_TEXTURE_2D, 0)
+
+    def _draw_background_gradient(self):
+        # Screen-space gradient to avoid a flat black backdrop.
+        glUseProgram(0)
+        glDisable(GL_DEPTH_TEST)
+        glDisable(GL_TEXTURE_2D)
+
+        glMatrixMode(GL_PROJECTION)
+        glPushMatrix()
+        glLoadIdentity()
+        glOrtho(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0)
+
+        glMatrixMode(GL_MODELVIEW)
+        glPushMatrix()
+        glLoadIdentity()
+
+        b = min(max(self.background_brightness, 0.2), 2.0)
+        bottom = np.clip(np.array([0.03, 0.03, 0.05]) * b, 0.0, 1.0)
+        top = np.clip(np.array([0.09, 0.11, 0.16]) * b, 0.0, 1.0)
+
+        glBegin(GL_QUADS)
+        glColor3f(float(bottom[0]), float(bottom[1]), float(bottom[2]))  # bottom
+        glVertex3f(-1.0, -1.0, 0.0)
+        glVertex3f(1.0, -1.0, 0.0)
+        glColor3f(float(top[0]), float(top[1]), float(top[2]))  # top
+        glVertex3f(1.0, 1.0, 0.0)
+        glVertex3f(-1.0, 1.0, 0.0)
+        glEnd()
+
+        glPopMatrix()
+        glMatrixMode(GL_PROJECTION)
+        glPopMatrix()
+        glMatrixMode(GL_MODELVIEW)
+        glEnable(GL_DEPTH_TEST)
+
+    def _draw_ground_plane(self):
+        glUseProgram(0)
+        glDisable(GL_TEXTURE_2D)
+        size = max(1.6, self.model_radius * 3.0)
+        ground_y = 0.0
+
+        glBegin(GL_QUADS)
+        glColor3f(0.07, 0.08, 0.10)
+        glVertex3f(-size, ground_y, -size)
+        glVertex3f(size, ground_y, -size)
+        glColor3f(0.04, 0.05, 0.06)
+        glVertex3f(size, ground_y, size)
+        glVertex3f(-size, ground_y, size)
+        glEnd()
+
+    def _draw_projected_shadow(self):
+        if self.vertices.size == 0 or self.indices.size == 0:
+            return
+
+        glUseProgram(0)
+        glDisable(GL_TEXTURE_2D)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+        shadow_matrix = self._build_planar_shadow_matrix(self.light_positions[0], [0.0, 1.0, 0.0, 0.0])
+
+        glPushMatrix()
+        # Lift projected shadow slightly above the plane to reduce z-fighting.
+        glTranslatef(0.0, 0.002, 0.0)
+        glMultMatrixf(shadow_matrix)
+        self._apply_model_translation()
+        glColor4f(0.0, 0.0, 0.0, float(self.shadow_opacity))
+
+        glEnableClientState(GL_VERTEX_ARRAY)
+        glVertexPointer(3, GL_FLOAT, 0, self.vertices)
+        glDrawElements(GL_TRIANGLES, int(self.indices.size), GL_UNSIGNED_INT, self.indices)
+        glDisableClientState(GL_VERTEX_ARRAY)
+
+        glPopMatrix()
+        glDisable(GL_BLEND)
+
+    def _build_planar_shadow_matrix(self, light_pos, plane):
+        lx, ly, lz = light_pos
+        lw = 1.0
+        a, b, c, d = plane
+        dot = a * lx + b * ly + c * lz + d * lw
+        mat = np.array(
+            [
+                [dot - lx * a, -lx * b, -lx * c, -lx * d],
+                [-ly * a, dot - ly * b, -ly * c, -ly * d],
+                [-lz * a, -lz * b, dot - lz * c, -lz * d],
+                [-lw * a, -lw * b, -lw * c, dot - lw * d],
+            ],
+            dtype=np.float32,
+        )
+        return mat.T.reshape(16)
+
+    def _apply_model_translation(self):
+        glTranslatef(
+            float(self.model_translate[0]),
+            float(self.model_translate[1]),
+            float(self.model_translate[2]),
+        )
 
     def _set_sampler_uniform(self, name, value):
         location = glGetUniformLocation(self.shader_program, name)
@@ -395,26 +560,131 @@ class OpenGLWidget(QOpenGLWidget):
         glBindTexture(GL_TEXTURE_2D, int(texture_id) if texture_id else 0)
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._inertia_timer.stop()
+            self._orbit_vel_x = 0.0
+            self._orbit_vel_y = 0.0
+            self._last_mouse_left_drag = True
         self.last_mouse_pos = event.pos()
 
     def mouseMoveEvent(self, event):
+        accel = 2.5 if (event.modifiers() & Qt.ShiftModifier) else 1.0
         if event.buttons() == Qt.LeftButton:
             dx = event.x() - self.last_mouse_pos.x()
             dy = event.y() - self.last_mouse_pos.y()
-            self.angle_x += dy
-            self.angle_y += dx
+            rot_scale = self.rotate_speed * accel
+            self.angle_x += dy * rot_scale
+            self.angle_y += dx * rot_scale
+            self._orbit_vel_x = dx * rot_scale * 0.12
+            self._orbit_vel_y = dy * rot_scale * 0.12
             self.last_mouse_pos = event.pos()
             self.update()
+            return
+
+        if event.buttons() == Qt.RightButton:
+            dx = event.x() - self.last_mouse_pos.x()
+            dy = event.y() - self.last_mouse_pos.y()
+            pan_scale = (self.model_radius * 1.3) / max(min(self.width(), self.height()), 1)
+            pan_scale /= max(self.zoom, 0.05)
+            pan_scale *= accel
+            self.pan_x -= dx * pan_scale
+            self.pan_y += dy * pan_scale
+            self.last_mouse_pos = event.pos()
+            self.update()
+            return
 
     def wheelEvent(self, event):
+        accel = 1.5 if (event.modifiers() & Qt.ShiftModifier) else 1.0
         delta = event.angleDelta().y() / 120
-        self.zoom *= 1.1 ** delta
+        self.zoom *= (self.zoom_speed ** accel) ** delta
+        self.zoom = min(max(self.zoom, 0.1), 20.0)
         self.resizeGL(self.width(), self.height())
         self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._last_mouse_left_drag:
+            speed = abs(self._orbit_vel_x) + abs(self._orbit_vel_y)
+            if speed > self._inertia_min_velocity:
+                self._inertia_timer.start()
+            self._last_mouse_left_drag = False
+        super().mouseReleaseEvent(event)
 
     def set_angle(self, angle_x: float, angle_y: float):
         self.angle_x = angle_x
         self.angle_y = angle_y
+        self.update()
+
+    def fit_model(self):
+        self.zoom = 1.0
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self._request_projection_refresh()
+        self.update()
+
+    def reset_view(self):
+        self.angle_x = 0.0
+        self.angle_y = 0.0
+        self.zoom = 1.0
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self.projection_mode = "perspective"
+        self._inertia_timer.stop()
+        self._orbit_vel_x = 0.0
+        self._orbit_vel_y = 0.0
+        self._request_projection_refresh()
+        self.update()
+
+    def set_projection_mode(self, mode: str):
+        if mode not in ("perspective", "orthographic"):
+            return
+        self.projection_mode = mode
+        self._request_projection_refresh()
+        self.update()
+
+    def toggle_projection_mode(self):
+        self.set_projection_mode("orthographic" if self.projection_mode == "perspective" else "perspective")
+
+    def set_zoom_speed(self, value: float):
+        self.zoom_speed = min(max(value, 1.01), 1.5)
+
+    def set_rotate_speed(self, value: float):
+        self.rotate_speed = min(max(value, 0.1), 4.0)
+
+    def set_ambient_strength(self, value: float):
+        self.ambient_strength = min(max(value, 0.0), 0.5)
+        self.update()
+
+    def set_key_light_intensity(self, value: float):
+        self.key_light_intensity = min(max(value, 0.0), 50.0)
+        self.update()
+
+    def set_fill_light_intensity(self, value: float):
+        self.fill_light_intensity = min(max(value, 0.0), 50.0)
+        self.update()
+
+    def set_background_brightness(self, value: float):
+        self.background_brightness = min(max(value, 0.2), 2.0)
+        self.update()
+
+    def set_alpha_cutoff(self, value: float):
+        self.alpha_cutoff = min(max(value, 0.0), 1.0)
+        self.update()
+
+    def _request_projection_refresh(self):
+        # During app startup the GL context may not exist yet.
+        if self.context() is None:
+            return
+        self.resizeGL(self.width(), self.height())
+
+    def _on_inertia_tick(self):
+        self.angle_y += self._orbit_vel_x
+        self.angle_x += self._orbit_vel_y
+        self._orbit_vel_x *= self._inertia_damping
+        self._orbit_vel_y *= self._inertia_damping
+        if abs(self._orbit_vel_x) + abs(self._orbit_vel_y) < self._inertia_min_velocity:
+            self._inertia_timer.stop()
+            self._orbit_vel_x = 0.0
+            self._orbit_vel_y = 0.0
         self.update()
 
     def apply_texture_path(self, channel: str, path: str) -> bool:
@@ -530,6 +800,29 @@ class OpenGLWidget(QOpenGLWidget):
             self._clear_channel_texture(ch)
         self.last_texture_paths = {ch: "" for ch in ALL_CHANNELS}
         self.last_texture_path = ""
+
+    def _compute_model_bounds(self):
+        if self.vertices.size == 0:
+            self.model_center = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+            self.model_translate = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+            self.model_target_y = 0.0
+            self.model_radius = 1.0
+            return
+
+        mins = np.min(self.vertices, axis=0)
+        maxs = np.max(self.vertices, axis=0)
+        center = (mins + maxs) * 0.5
+        self.model_center = center.astype(np.float32)
+        self.model_translate = np.array([-center[0], -mins[1], -center[2]], dtype=np.float32)
+        self.model_target_y = float(center[1] - mins[1])
+
+        centered = self.vertices - center
+        lengths = np.linalg.norm(centered, axis=1)
+        if lengths.size == 0:
+            self.model_radius = 1.0
+            return
+        radius = float(np.max(lengths))
+        self.model_radius = radius if radius > 0 else 1.0
 
     def closeEvent(self, event):
         self._clear_all_textures()

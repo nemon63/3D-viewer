@@ -11,6 +11,9 @@ from PyQt5.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QPushButton,
+    QShortcut,
+    QSlider,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -35,10 +38,13 @@ class MainWindow(QMainWindow):
         ]
         self.material_boxes = {}
         self.init_ui()
+        self._register_shortcuts()
         self._restore_last_directory()
 
     def init_ui(self):
         self.setWindowTitle("3D Viewer")
+        self.resize(1600, 900)
+        self.setMinimumSize(1200, 700)
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
 
@@ -76,6 +82,8 @@ class MainWindow(QMainWindow):
         self.status_label.setWordWrap(True)
         panel_layout.addWidget(self.status_label)
 
+        controls_tabs = QTabWidget(self)
+
         material_group = QGroupBox("Материалы", self)
         material_layout = QFormLayout(material_group)
         for channel, title in self.material_channels:
@@ -93,10 +101,99 @@ class MainWindow(QMainWindow):
         apply_preview_button = QPushButton("Показать карту канала", self)
         apply_preview_button.clicked.connect(self._apply_preview_channel)
         material_layout.addRow(apply_preview_button)
-        panel_layout.addWidget(material_group)
+
+        self.alpha_cutoff_label = QLabel("0.50", self)
+        self.alpha_cutoff_slider = QSlider(Qt.Horizontal, self)
+        self.alpha_cutoff_slider.setRange(10, 90)
+        self.alpha_cutoff_slider.setValue(50)
+        self.alpha_cutoff_slider.valueChanged.connect(self._on_alpha_cutoff_changed)
+        material_layout.addRow("Alpha Cutoff", self.alpha_cutoff_slider)
+        material_layout.addRow("Значение", self.alpha_cutoff_label)
+        controls_tabs.addTab(material_group, "Материалы")
+
+        camera_group = QGroupBox("Камера", self)
+        camera_layout = QFormLayout(camera_group)
+
+        fit_button = QPushButton("Frame/Fit model", self)
+        fit_button.clicked.connect(self.gl_widget.fit_model)
+        camera_layout.addRow(fit_button)
+
+        reset_button = QPushButton("Reset view", self)
+        reset_button.clicked.connect(self.gl_widget.reset_view)
+        camera_layout.addRow(reset_button)
+
+        self.projection_combo = QComboBox(self)
+        self.projection_combo.addItem("Perspective", "perspective")
+        self.projection_combo.addItem("Orthographic", "orthographic")
+        self.projection_combo.currentIndexChanged.connect(self._on_projection_changed)
+        camera_layout.addRow("Projection", self.projection_combo)
+
+        self.rotate_speed_label = QLabel("1.00", self)
+        self.rotate_speed_slider = QSlider(Qt.Horizontal, self)
+        self.rotate_speed_slider.setRange(10, 300)
+        self.rotate_speed_slider.setValue(100)
+        self.rotate_speed_slider.valueChanged.connect(self._on_rotate_speed_changed)
+        camera_layout.addRow("Rotate speed", self.rotate_speed_slider)
+        camera_layout.addRow("Rotate x", self.rotate_speed_label)
+
+        self.zoom_speed_label = QLabel("1.10", self)
+        self.zoom_speed_slider = QSlider(Qt.Horizontal, self)
+        self.zoom_speed_slider.setRange(102, 150)
+        self.zoom_speed_slider.setValue(110)
+        self.zoom_speed_slider.valueChanged.connect(self._on_zoom_speed_changed)
+        camera_layout.addRow("Zoom speed", self.zoom_speed_slider)
+        camera_layout.addRow("Zoom x", self.zoom_speed_label)
+
+        controls_tabs.addTab(camera_group, "Камера")
+
+        light_group = QGroupBox("Свет", self)
+        light_layout = QFormLayout(light_group)
+
+        self.ambient_label = QLabel("0.08", self)
+        self.ambient_slider = QSlider(Qt.Horizontal, self)
+        self.ambient_slider.setRange(0, 50)
+        self.ambient_slider.setValue(8)
+        self.ambient_slider.valueChanged.connect(self._on_ambient_changed)
+        light_layout.addRow("Ambient", self.ambient_slider)
+        light_layout.addRow("Ambient x", self.ambient_label)
+
+        self.key_light_label = QLabel("18.0", self)
+        self.key_light_slider = QSlider(Qt.Horizontal, self)
+        self.key_light_slider.setRange(0, 500)
+        self.key_light_slider.setValue(180)
+        self.key_light_slider.valueChanged.connect(self._on_key_light_changed)
+        light_layout.addRow("Key light", self.key_light_slider)
+        light_layout.addRow("Key x", self.key_light_label)
+
+        self.fill_light_label = QLabel("10.0", self)
+        self.fill_light_slider = QSlider(Qt.Horizontal, self)
+        self.fill_light_slider.setRange(0, 500)
+        self.fill_light_slider.setValue(100)
+        self.fill_light_slider.valueChanged.connect(self._on_fill_light_changed)
+        light_layout.addRow("Fill light", self.fill_light_slider)
+        light_layout.addRow("Fill x", self.fill_light_label)
+
+        self.bg_brightness_label = QLabel("1.00", self)
+        self.bg_brightness_slider = QSlider(Qt.Horizontal, self)
+        self.bg_brightness_slider.setRange(20, 200)
+        self.bg_brightness_slider.setValue(100)
+        self.bg_brightness_slider.valueChanged.connect(self._on_background_brightness_changed)
+        light_layout.addRow("Background", self.bg_brightness_slider)
+        light_layout.addRow("Background x", self.bg_brightness_label)
+
+        controls_tabs.addTab(light_group, "Свет")
+        panel_layout.addWidget(controls_tabs)
 
         root_layout.addWidget(browser_panel)
         root_layout.addWidget(self.gl_widget, stretch=1)
+
+        self._on_alpha_cutoff_changed(self.alpha_cutoff_slider.value())
+        self._on_rotate_speed_changed(self.rotate_speed_slider.value())
+        self._on_zoom_speed_changed(self.zoom_speed_slider.value())
+        self._on_ambient_changed(self.ambient_slider.value())
+        self._on_key_light_changed(self.key_light_slider.value())
+        self._on_fill_light_changed(self.fill_light_slider.value())
+        self._on_background_brightness_changed(self.bg_brightness_slider.value())
 
     def _restore_last_directory(self):
         last_directory = self.settings.value("last_directory", "", type=str)
@@ -185,18 +282,6 @@ class MainWindow(QMainWindow):
         self.model_list.setCurrentRow(row)
 
     def keyPressEvent(self, event):
-        if event.key() in (Qt.Key_PageUp, Qt.Key_A):
-            self.show_previous_model()
-            return
-        if event.key() in (Qt.Key_PageDown, Qt.Key_D):
-            self.show_next_model()
-            return
-        if event.key() == Qt.Key_L:
-            self.gl_widget.unlit_texture_preview = not self.gl_widget.unlit_texture_preview
-            row = self.model_list.currentRow()
-            self._load_model_at_row(row)
-            return
-
         key_mappings = {
             Qt.Key_Left: (0, -5),
             Qt.Key_Right: (0, 5),
@@ -206,10 +291,60 @@ class MainWindow(QMainWindow):
 
         if event.key() in key_mappings:
             dx, dy = key_mappings[event.key()]
-            self.gl_widget.set_angle(self.gl_widget.angle_x + dx, self.gl_widget.angle_y + dy)
+            speed = self.gl_widget.rotate_speed
+            self.gl_widget.set_angle(self.gl_widget.angle_x + dx * speed, self.gl_widget.angle_y + dy * speed)
             return
 
         super().keyPressEvent(event)
+
+    def _register_shortcuts(self):
+        # Use WindowShortcut so actions work even when focus is inside list/widgets.
+        self.shortcut_prev_pg = QShortcut(Qt.Key_PageUp, self)
+        self.shortcut_prev_pg.setContext(Qt.WindowShortcut)
+        self.shortcut_prev_pg.activated.connect(self.show_previous_model)
+
+        self.shortcut_next_pg = QShortcut(Qt.Key_PageDown, self)
+        self.shortcut_next_pg.setContext(Qt.WindowShortcut)
+        self.shortcut_next_pg.activated.connect(self.show_next_model)
+
+        self.shortcut_prev_a = QShortcut(Qt.Key_A, self)
+        self.shortcut_prev_a.setContext(Qt.WindowShortcut)
+        self.shortcut_prev_a.activated.connect(self.show_previous_model)
+
+        self.shortcut_next_d = QShortcut(Qt.Key_D, self)
+        self.shortcut_next_d.setContext(Qt.WindowShortcut)
+        self.shortcut_next_d.activated.connect(self.show_next_model)
+
+        self.shortcut_fit = QShortcut(Qt.Key_F, self)
+        self.shortcut_fit.setContext(Qt.WindowShortcut)
+        self.shortcut_fit.activated.connect(self.gl_widget.fit_model)
+
+        self.shortcut_reset = QShortcut(Qt.Key_R, self)
+        self.shortcut_reset.setContext(Qt.WindowShortcut)
+        self.shortcut_reset.activated.connect(self._reset_view_action)
+
+        self.shortcut_projection = QShortcut(Qt.Key_P, self)
+        self.shortcut_projection.setContext(Qt.WindowShortcut)
+        self.shortcut_projection.activated.connect(self._toggle_projection_action)
+
+        self.shortcut_lit = QShortcut(Qt.Key_L, self)
+        self.shortcut_lit.setContext(Qt.WindowShortcut)
+        self.shortcut_lit.activated.connect(self._toggle_lit_action)
+
+    def _reset_view_action(self):
+        self.gl_widget.reset_view()
+        self._sync_projection_combo()
+        self._update_status(self.model_list.currentRow())
+
+    def _toggle_projection_action(self):
+        self.gl_widget.toggle_projection_mode()
+        self._sync_projection_combo()
+        self._update_status(self.model_list.currentRow())
+
+    def _toggle_lit_action(self):
+        self.gl_widget.unlit_texture_preview = not self.gl_widget.unlit_texture_preview
+        self._update_status(self.model_list.currentRow())
+        self.gl_widget.update()
 
     def _populate_material_controls(self, texture_sets):
         for channel, _title in self.material_channels:
@@ -257,7 +392,56 @@ class MainWindow(QMainWindow):
         tex_count = debug.get("texture_candidates_count", 0)
         tex_file = os.path.basename(self.gl_widget.last_texture_path) if self.gl_widget.last_texture_path else "не выбрана"
         preview = "unlit" if self.gl_widget.unlit_texture_preview else "lit"
+        projection = "ortho" if self.gl_widget.projection_mode == "orthographic" else "persp"
         self.status_label.setText(
             f"Открыт: {os.path.basename(file_path)} ({row + 1}/{len(self.model_files)}) | "
-            f"UV: {uv_count} | Текстур-кандидатов: {tex_count} | Текстура: {tex_file} | {preview}"
+            f"UV: {uv_count} | Текстур-кандидатов: {tex_count} | Текстура: {tex_file} | {preview} | {projection}"
         )
+
+    def _on_alpha_cutoff_changed(self, value: int):
+        cutoff = value / 100.0
+        self.alpha_cutoff_label.setText(f"{cutoff:.2f}")
+        self.gl_widget.set_alpha_cutoff(cutoff)
+
+    def _on_projection_changed(self):
+        mode = self.projection_combo.currentData()
+        self.gl_widget.set_projection_mode(mode)
+        self._update_status(self.model_list.currentRow())
+
+    def _on_rotate_speed_changed(self, value: int):
+        speed = value / 100.0
+        self.rotate_speed_label.setText(f"{speed:.2f}")
+        self.gl_widget.set_rotate_speed(speed)
+
+    def _on_zoom_speed_changed(self, value: int):
+        speed = value / 100.0
+        self.zoom_speed_label.setText(f"{speed:.2f}")
+        self.gl_widget.set_zoom_speed(speed)
+
+    def _on_ambient_changed(self, value: int):
+        ambient = value / 100.0
+        self.ambient_label.setText(f"{ambient:.2f}")
+        self.gl_widget.set_ambient_strength(ambient)
+
+    def _on_key_light_changed(self, value: int):
+        intensity = value / 10.0
+        self.key_light_label.setText(f"{intensity:.1f}")
+        self.gl_widget.set_key_light_intensity(intensity)
+
+    def _on_fill_light_changed(self, value: int):
+        intensity = value / 10.0
+        self.fill_light_label.setText(f"{intensity:.1f}")
+        self.gl_widget.set_fill_light_intensity(intensity)
+
+    def _on_background_brightness_changed(self, value: int):
+        brightness = value / 100.0
+        self.bg_brightness_label.setText(f"{brightness:.2f}")
+        self.gl_widget.set_background_brightness(brightness)
+
+    def _sync_projection_combo(self):
+        wanted = "orthographic" if self.gl_widget.projection_mode == "orthographic" else "perspective"
+        index = self.projection_combo.findData(wanted)
+        if index >= 0 and self.projection_combo.currentIndex() != index:
+            self.projection_combo.blockSignals(True)
+            self.projection_combo.setCurrentIndex(index)
+            self.projection_combo.blockSignals(False)
