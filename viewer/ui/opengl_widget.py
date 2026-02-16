@@ -21,6 +21,7 @@ from OpenGL.GL import (
     GL_TEXTURE1,
     GL_TEXTURE2,
     GL_TEXTURE3,
+    GL_TEXTURE4,
     GL_TEXTURE_2D,
     GL_TEXTURE_MAG_FILTER,
     GL_TEXTURE_MIN_FILTER,
@@ -32,6 +33,15 @@ from OpenGL.GL import (
     GL_UNSIGNED_BYTE,
     GL_UNSIGNED_INT,
     GL_VERTEX_SHADER,
+    GL_DEPTH_COMPONENT,
+    GL_DEPTH_COMPONENT24,
+    GL_FRAMEBUFFER,
+    GL_DEPTH_ATTACHMENT,
+    GL_FRAMEBUFFER_COMPLETE,
+    GL_NEAREST,
+    GL_CLAMP_TO_EDGE,
+    GL_NONE,
+    GL_POLYGON_OFFSET_FILL,
     glActiveTexture,
     glBindTexture,
     glBlendFunc,
@@ -44,13 +54,18 @@ from OpenGL.GL import (
     glDisable,
     glDisableClientState,
     glDrawElements,
+    glDrawBuffer,
     glEnable,
     glEnableClientState,
+    glFramebufferTexture2D,
+    glBindFramebuffer,
+    glGenFramebuffers,
+    glDeleteFramebuffers,
+    glCheckFramebufferStatus,
     glGenTextures,
     glGetUniformLocation,
     glLoadIdentity,
     glMatrixMode,
-    glMultMatrixf,
     glPopMatrix,
     glPushMatrix,
     glNormalPointer,
@@ -60,9 +75,13 @@ from OpenGL.GL import (
     glTexImage2D,
     glTexParameteri,
     glTranslatef,
+    glUniform2f,
     glUniform1f,
     glUniform1i,
     glUniform3f,
+    glUniformMatrix4fv,
+    glReadBuffer,
+    glPolygonOffset,
     glUseProgram,
     glBegin,
     glEnd,
@@ -98,12 +117,18 @@ VERTEX_SHADER_SRC = """
 varying vec3 vPosView;
 varying vec3 vNormalView;
 varying vec2 vUv;
+varying vec4 vShadowCoord;
+
+uniform mat4 uLightVP;
+uniform vec3 uModelOffset;
 
 void main() {
     vec4 posView = gl_ModelViewMatrix * gl_Vertex;
     vPosView = posView.xyz;
     vNormalView = normalize(gl_NormalMatrix * gl_Normal);
     vUv = gl_MultiTexCoord0.xy;
+    vec4 worldPos = vec4(gl_Vertex.xyz + uModelOffset, 1.0);
+    vShadowCoord = uLightVP * worldPos;
     gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
 }
 """
@@ -114,6 +139,7 @@ FRAGMENT_SHADER_SRC = """
 varying vec3 vPosView;
 varying vec3 vNormalView;
 varying vec2 vUv;
+varying vec4 vShadowCoord;
 
 uniform vec3 uLightPosView0;
 uniform vec3 uLightPosView1;
@@ -133,6 +159,9 @@ uniform int uUnlitTexturePreview;
 uniform int uUseAlphaCutout;
 uniform float uAlphaCutoff;
 uniform float uAmbientStrength;
+uniform int uShadowEnabled;
+uniform sampler2D uShadowMap;
+uniform vec2 uShadowTexelSize;
 
 float DistributionGGX(vec3 N, vec3 H, float roughness) {
     float a = roughness * roughness;
@@ -161,6 +190,31 @@ float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
 
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+}
+
+float computeShadow(vec3 N, vec3 L) {
+    if (uShadowEnabled == 0) {
+        return 1.0;
+    }
+
+    vec3 proj = vShadowCoord.xyz / max(vShadowCoord.w, 0.0001);
+    vec2 uv = proj.xy * 0.5 + 0.5;
+    float currentDepth = proj.z * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || currentDepth > 1.0) {
+        return 1.0;
+    }
+
+    float bias = max(0.0008, 0.0035 * (1.0 - max(dot(N, L), 0.0)));
+    float shadow = 0.0;
+    for (int x = -1; x <= 1; ++x) {
+        for (int y = -1; y <= 1; ++y) {
+            vec2 offset = vec2(float(x), float(y)) * uShadowTexelSize;
+            float depthFromMap = texture2D(uShadowMap, uv + offset).r;
+            shadow += (currentDepth - bias > depthFromMap) ? 1.0 : 0.0;
+        }
+    }
+    shadow /= 9.0;
+    return 1.0 - shadow;
 }
 
 vec3 computeLight(vec3 N, vec3 V, vec3 albedo, float metallic, float roughness, vec3 F0, vec3 lightPos, vec3 lightColor) {
@@ -211,9 +265,11 @@ void main() {
 
     vec3 V = normalize(-vPosView);
     vec3 F0 = mix(vec3(0.04), base, metallic);
+    vec3 L0 = normalize(uLightPosView0 - vPosView);
+    float shadowFactor = computeShadow(N, L0);
 
     vec3 Lo = vec3(0.0);
-    Lo += computeLight(N, V, base, metallic, roughness, F0, uLightPosView0, uLightColor0);
+    Lo += computeLight(N, V, base, metallic, roughness, F0, uLightPosView0, uLightColor0) * shadowFactor;
     Lo += computeLight(N, V, base, metallic, roughness, F0, uLightPosView1, uLightColor1);
 
     vec3 ambient = vec3(uAmbientStrength) * base;
@@ -223,6 +279,23 @@ void main() {
     color = color / (color + vec3(1.0));
     color = pow(color, vec3(1.0 / 2.2));
     gl_FragColor = vec4(color, alpha);
+}
+"""
+
+VERTEX_SHADER_DEPTH_SRC = """
+#version 120
+uniform mat4 uLightVP;
+uniform vec3 uModelOffset;
+
+void main() {
+    vec4 worldPos = vec4(gl_Vertex.xyz + uModelOffset, 1.0);
+    gl_Position = uLightVP * worldPos;
+}
+"""
+
+FRAGMENT_SHADER_DEPTH_SRC = """
+#version 120
+void main() {
 }
 """
 
@@ -276,9 +349,13 @@ class OpenGLWidget(QOpenGLWidget):
         self.key_light_intensity = 18.0
         self.fill_light_intensity = 10.0
         self.alpha_cutoff = 0.5
-        self.enable_ground_shadow = True
-        self.shadow_opacity = 0.34
+        self.enable_ground_shadow = False
         self.background_brightness = 1.0
+        self.shadow_size = 1024
+        self.shadow_fbo = 0
+        self.shadow_depth_tex = 0
+        self.depth_shader_program = None
+        self._light_vp = np.identity(4, dtype=np.float32)
 
         self._inertia_timer = QTimer(self)
         self._inertia_timer.setInterval(16)
@@ -288,12 +365,72 @@ class OpenGLWidget(QOpenGLWidget):
         glEnable(GL_DEPTH_TEST)
         glClearColor(0.0, 0.0, 0.0, 1.0)
         self._init_shaders()
+        try:
+            self._init_shadow_pipeline()
+        except Exception:
+            # Do not break rendering on unsupported shadow-map path.
+            self.enable_ground_shadow = False
+            self.depth_shader_program = None
+            self.shadow_fbo = 0
+            self.shadow_depth_tex = 0
 
     def _init_shaders(self):
         self.shader_program = compileProgram(
             compileShader(VERTEX_SHADER_SRC, GL_VERTEX_SHADER),
             compileShader(FRAGMENT_SHADER_SRC, GL_FRAGMENT_SHADER),
         )
+
+    def _init_shadow_pipeline(self):
+        self.depth_shader_program = compileProgram(
+            compileShader(VERTEX_SHADER_DEPTH_SRC, GL_VERTEX_SHADER),
+            compileShader(FRAGMENT_SHADER_DEPTH_SRC, GL_FRAGMENT_SHADER),
+        )
+        self._recreate_shadow_targets(self.shadow_size)
+
+    def _recreate_shadow_targets(self, size: int):
+        size = int(max(256, size))
+        if self.shadow_depth_tex:
+            glDeleteTextures([int(self.shadow_depth_tex)])
+            self.shadow_depth_tex = 0
+        if self.shadow_fbo:
+            glDeleteFramebuffers(1, [int(self.shadow_fbo)])
+            self.shadow_fbo = 0
+
+        tex_id = glGenTextures(1)
+        if isinstance(tex_id, (tuple, list)):
+            tex_id = int(tex_id[0])
+        self.shadow_depth_tex = int(tex_id)
+
+        glBindTexture(GL_TEXTURE_2D, self.shadow_depth_tex)
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_DEPTH_COMPONENT,
+            size,
+            size,
+            0,
+            GL_DEPTH_COMPONENT,
+            GL_FLOAT,
+            None,
+        )
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        glBindTexture(GL_TEXTURE_2D, 0)
+
+        fbo_id = glGenFramebuffers(1)
+        if isinstance(fbo_id, (tuple, list)):
+            fbo_id = int(fbo_id[0])
+        self.shadow_fbo = int(fbo_id)
+        glBindFramebuffer(GL_FRAMEBUFFER, self.shadow_fbo)
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, self.shadow_depth_tex, 0)
+        glDrawBuffer(GL_NONE)
+        glReadBuffer(GL_NONE)
+        status = glCheckFramebufferStatus(GL_FRAMEBUFFER)
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        if status != GL_FRAMEBUFFER_COMPLETE:
+            self.enable_ground_shadow = False
 
     def load_mesh(self, file_path: str) -> bool:
         try:
@@ -354,6 +491,13 @@ class OpenGLWidget(QOpenGLWidget):
             gluPerspective(45.0, aspect, 0.1, 100.0)
 
     def paintGL(self):
+        if self.enable_ground_shadow and self.vertices.size and self.indices.size and self.depth_shader_program and self.shadow_fbo:
+            try:
+                self._render_shadow_map()
+            except Exception:
+                # Runtime fallback for drivers with incomplete depth/FBO behavior.
+                self.enable_ground_shadow = False
+
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         self._draw_background_gradient()
 
@@ -369,8 +513,6 @@ class OpenGLWidget(QOpenGLWidget):
         glRotatef(self.angle_y, 0, 1, 0)
 
         self._draw_ground_plane()
-        if self.enable_ground_shadow:
-            self._draw_projected_shadow()
 
         if self.vertices.size == 0 or self.indices.size == 0 or self.shader_program is None:
             return
@@ -411,6 +553,15 @@ class OpenGLWidget(QOpenGLWidget):
         fill_color = [c * self.fill_light_intensity for c in self.light_colors[1]]
         self._set_vec3_uniform("uLightColor0", *key_color)
         self._set_vec3_uniform("uLightColor1", *fill_color)
+        self._set_matrix_uniform("uLightVP", self._light_vp)
+        self._set_vec3_uniform("uModelOffset", *self.model_translate)
+        self._set_sampler_uniform("uShadowMap", 4)
+        texel = 1.0 / float(max(self.shadow_size, 1))
+        self._set_int_uniform("uShadowEnabled", 1 if (self.enable_ground_shadow and self.shadow_depth_tex) else 0)
+        location = glGetUniformLocation(self.shader_program, "uShadowTexelSize")
+        if location != -1:
+            glUniform2f(location, texel, texel)
+        self._bind_texture_unit(4, self.shadow_depth_tex)
 
     def _draw_mesh(self):
         glEnableClientState(GL_VERTEX_ARRAY)
@@ -432,7 +583,7 @@ class OpenGLWidget(QOpenGLWidget):
         glDisableClientState(GL_VERTEX_ARRAY)
 
         # Unbind texture units
-        for unit in (GL_TEXTURE0, GL_TEXTURE1, GL_TEXTURE2, GL_TEXTURE3):
+        for unit in (GL_TEXTURE0, GL_TEXTURE1, GL_TEXTURE2, GL_TEXTURE3, GL_TEXTURE4):
             glActiveTexture(unit)
             glBindTexture(GL_TEXTURE_2D, 0)
 
@@ -485,47 +636,37 @@ class OpenGLWidget(QOpenGLWidget):
         glVertex3f(-size, ground_y, size)
         glEnd()
 
-    def _draw_projected_shadow(self):
-        if self.vertices.size == 0 or self.indices.size == 0:
+    def _render_shadow_map(self):
+        target = np.array([0.0, self.model_target_y, 0.0], dtype=np.float32)
+        light_pos = np.array(self.light_positions[0], dtype=np.float32)
+        light_view = self._look_at_matrix(light_pos, target, np.array([0.0, 1.0, 0.0], dtype=np.float32))
+        extent = max(1.0, self.model_radius * 1.8)
+        light_proj = self._ortho_matrix(-extent, extent, -extent, extent, 0.1, max(12.0, self.model_radius * 8.0))
+        self._light_vp = np.dot(light_proj, light_view).astype(np.float32)
+
+        glBindFramebuffer(GL_FRAMEBUFFER, self.shadow_fbo)
+        status = glCheckFramebufferStatus(GL_FRAMEBUFFER)
+        if status != GL_FRAMEBUFFER_COMPLETE:
+            glBindFramebuffer(GL_FRAMEBUFFER, int(self.defaultFramebufferObject()))
+            self.enable_ground_shadow = False
             return
+        glViewport(0, 0, self.shadow_size, self.shadow_size)
+        glClear(GL_DEPTH_BUFFER_BIT)
+        glEnable(GL_POLYGON_OFFSET_FILL)
+        glPolygonOffset(2.0, 4.0)
 
-        glUseProgram(0)
-        glDisable(GL_TEXTURE_2D)
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-
-        shadow_matrix = self._build_planar_shadow_matrix(self.light_positions[0], [0.0, 1.0, 0.0, 0.0])
-
-        glPushMatrix()
-        # Lift projected shadow slightly above the plane to reduce z-fighting.
-        glTranslatef(0.0, 0.002, 0.0)
-        glMultMatrixf(shadow_matrix)
-        self._apply_model_translation()
-        glColor4f(0.0, 0.0, 0.0, float(self.shadow_opacity))
-
-        glEnableClientState(GL_VERTEX_ARRAY)
-        glVertexPointer(3, GL_FLOAT, 0, self.vertices)
-        glDrawElements(GL_TRIANGLES, int(self.indices.size), GL_UNSIGNED_INT, self.indices)
-        glDisableClientState(GL_VERTEX_ARRAY)
-
-        glPopMatrix()
-        glDisable(GL_BLEND)
-
-    def _build_planar_shadow_matrix(self, light_pos, plane):
-        lx, ly, lz = light_pos
-        lw = 1.0
-        a, b, c, d = plane
-        dot = a * lx + b * ly + c * lz + d * lw
-        mat = np.array(
-            [
-                [dot - lx * a, -lx * b, -lx * c, -lx * d],
-                [-ly * a, dot - ly * b, -ly * c, -ly * d],
-                [-lz * a, -lz * b, dot - lz * c, -lz * d],
-                [-lw * a, -lw * b, -lw * c, dot - lw * d],
-            ],
-            dtype=np.float32,
-        )
-        return mat.T.reshape(16)
+        glUseProgram(self.depth_shader_program)
+        try:
+            self._set_matrix_uniform("uLightVP", self._light_vp, program=self.depth_shader_program)
+            loc = glGetUniformLocation(self.depth_shader_program, "uModelOffset")
+            if loc != -1:
+                glUniform3f(loc, float(self.model_translate[0]), float(self.model_translate[1]), float(self.model_translate[2]))
+            self._draw_mesh_positions_only()
+        finally:
+            glUseProgram(0)
+            glDisable(GL_POLYGON_OFFSET_FILL)
+            glBindFramebuffer(GL_FRAMEBUFFER, int(self.defaultFramebufferObject()))
+            glViewport(0, 0, max(self.width(), 1), max(self.height(), 1))
 
     def _apply_model_translation(self):
         glTranslatef(
@@ -549,15 +690,62 @@ class OpenGLWidget(QOpenGLWidget):
         if location != -1:
             glUniform1f(location, float(value))
 
+    def _set_matrix_uniform(self, name, mat4, program=None):
+        prog = self.shader_program if program is None else program
+        location = glGetUniformLocation(prog, name)
+        if location != -1:
+            glUniformMatrix4fv(location, 1, GL_FALSE, np.asarray(mat4, dtype=np.float32).T)
+
     def _set_vec3_uniform(self, name, x, y, z):
         location = glGetUniformLocation(self.shader_program, name)
         if location != -1:
             glUniform3f(location, float(x), float(y), float(z))
 
     def _bind_texture_unit(self, slot: int, texture_id: int):
-        active = [GL_TEXTURE0, GL_TEXTURE1, GL_TEXTURE2, GL_TEXTURE3][slot]
+        active = [GL_TEXTURE0, GL_TEXTURE1, GL_TEXTURE2, GL_TEXTURE3, GL_TEXTURE4][slot]
         glActiveTexture(active)
         glBindTexture(GL_TEXTURE_2D, int(texture_id) if texture_id else 0)
+
+    def _draw_mesh_positions_only(self):
+        glEnableClientState(GL_VERTEX_ARRAY)
+        glVertexPointer(3, GL_FLOAT, 0, self.vertices)
+        glDrawElements(GL_TRIANGLES, int(self.indices.size), GL_UNSIGNED_INT, self.indices)
+        glDisableClientState(GL_VERTEX_ARRAY)
+
+    def _look_at_matrix(self, eye, target, up):
+        f = target - eye
+        fn = np.linalg.norm(f)
+        if fn < 1e-6:
+            f = np.array([0.0, -1.0, 0.0], dtype=np.float32)
+        else:
+            f = f / fn
+        u = up / max(np.linalg.norm(up), 1e-6)
+        s = np.cross(f, u)
+        sn = np.linalg.norm(s)
+        if sn < 1e-6:
+            s = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        else:
+            s = s / sn
+        u = np.cross(s, f)
+
+        m = np.identity(4, dtype=np.float32)
+        m[0, 0:3] = s
+        m[1, 0:3] = u
+        m[2, 0:3] = -f
+        m[0, 3] = -np.dot(s, eye)
+        m[1, 3] = -np.dot(u, eye)
+        m[2, 3] = np.dot(f, eye)
+        return m
+
+    def _ortho_matrix(self, left, right, bottom, top, near, far):
+        m = np.identity(4, dtype=np.float32)
+        m[0, 0] = 2.0 / max(right - left, 1e-6)
+        m[1, 1] = 2.0 / max(top - bottom, 1e-6)
+        m[2, 2] = -2.0 / max(far - near, 1e-6)
+        m[0, 3] = -(right + left) / max(right - left, 1e-6)
+        m[1, 3] = -(top + bottom) / max(top - bottom, 1e-6)
+        m[2, 3] = -(far + near) / max(far - near, 1e-6)
+        return m
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -826,10 +1014,27 @@ class OpenGLWidget(QOpenGLWidget):
 
     def closeEvent(self, event):
         self._clear_all_textures()
+        if self.context() is not None:
+            self.makeCurrent()
+            try:
+                if self.shadow_depth_tex:
+                    glDeleteTextures([int(self.shadow_depth_tex)])
+                    self.shadow_depth_tex = 0
+                if self.shadow_fbo:
+                    glDeleteFramebuffers(1, [int(self.shadow_fbo)])
+                    self.shadow_fbo = 0
+            finally:
+                self.doneCurrent()
         if self.shader_program:
             try:
                 glDeleteProgram(self.shader_program)
             except Exception:
                 pass
             self.shader_program = None
+        if self.depth_shader_program:
+            try:
+                glDeleteProgram(self.depth_shader_program)
+            except Exception:
+                pass
+            self.depth_shader_program = None
         super().closeEvent(event)
