@@ -1,6 +1,7 @@
 PyQt5>=5.15
 PyOpenGL>=3.1
 numpy>=1.23
+scipy>=1.10
 trimesh>=4.0
 Pillow>=10.0
 # FBX Python SDK не публикуется в PyPI как пакет `fbx`.

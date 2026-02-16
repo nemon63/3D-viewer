@@ -33,7 +33,8 @@ def _load_trimesh_payload(file_path: str) -> MeshPayload:
     if isinstance(scene_or_mesh, trimesh.Scene):
         if len(scene_or_mesh.geometry) == 1:
             mesh = next(iter(scene_or_mesh.geometry.values()))
-            vertices, indices, normals = process_mesh_data(mesh.vertices, mesh.faces, mesh.vertex_normals)
+            # Avoid trimesh sparse-normal path (requires scipy); we compute normals ourselves.
+            vertices, indices, normals = process_mesh_data(mesh.vertices, mesh.faces, [])
             texcoords = _extract_trimesh_uv(mesh)
             return MeshPayload(
                 vertices=vertices,
@@ -50,7 +51,7 @@ def _load_trimesh_payload(file_path: str) -> MeshPayload:
     vertices, indices, normals = process_mesh_data(
         scene_or_mesh.vertices,
         scene_or_mesh.faces,
-        scene_or_mesh.vertex_normals,
+        [],
     )
     texcoords = _extract_trimesh_uv(scene_or_mesh)
     return MeshPayload(
@@ -65,13 +66,11 @@ def _load_trimesh_payload(file_path: str) -> MeshPayload:
 def _combine_scene_meshes(scene: trimesh.Scene):
     combined_vertices = []
     combined_indices = []
-    combined_normals = []
     for geom in scene.geometry.values():
         index_offset = len(combined_vertices)
         combined_vertices.extend(geom.vertices)
         combined_indices.extend((geom.faces + index_offset).tolist())
-        combined_normals.extend(geom.vertex_normals)
-    return combined_vertices, combined_indices, combined_normals
+    return combined_vertices, combined_indices, []
 
 
 def _extract_trimesh_uv(mesh):
