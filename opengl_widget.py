@@ -14,6 +14,7 @@ from OpenGL.GL import (
     GL_LIGHTING,
     GL_MODELVIEW,
     GL_NORMAL_ARRAY,
+    GL_NORMALIZE,
     GL_POSITION,
     GL_PROJECTION,
     GL_QUADS,
@@ -56,6 +57,18 @@ try:
 except ImportError:
     fbx = None
 
+
+def _get_fbx_mesh_attr_type():
+    if fbx is None:
+        return None
+    if hasattr(fbx.FbxNodeAttribute, "eMesh"):
+        return fbx.FbxNodeAttribute.eMesh
+    etype = getattr(fbx.FbxNodeAttribute, "EType", None)
+    if etype is not None and hasattr(etype, "eMesh"):
+        return etype.eMesh
+    return None
+
+
 class OpenGLWidget(QOpenGLWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -71,11 +84,13 @@ class OpenGLWidget(QOpenGLWidget):
             [1.0, 1.0, 1.0, 1.0],
             [-1.0, 1.0, 1.0, 1.0]
         ]
+        self.show_light_markers = False
 
     def initializeGL(self):
         glEnable(GL_DEPTH_TEST)
         glShadeModel(GL_SMOOTH)
         glEnable(GL_LIGHTING)
+        glEnable(GL_NORMALIZE)
         glEnable(GL_COLOR_MATERIAL)
         glClearColor(0.0, 0.0, 0.0, 1.0)
         self.setup_lighting()
@@ -153,41 +168,91 @@ class OpenGLWidget(QOpenGLWidget):
         combined_vertices = []
         combined_indices = []
         combined_normals = []
+        vertex_offset = 0
+        mesh_attr_type = _get_fbx_mesh_attr_type()
 
         node_count = scene.GetNodeCount()
         for i in range(node_count):
             node = scene.GetNode(i)
             if node.GetNodeAttribute() is not None:
                 attr = node.GetNodeAttribute()
-                if attr.GetAttributeType() == fbx.FbxNodeAttribute.eMesh:
-                    mesh = attr.GetNode()
+                if mesh_attr_type is not None and attr.GetAttributeType() == mesh_attr_type:
+                    mesh = node.GetMesh()
                     control_points = mesh.GetControlPoints()
+                    local_vertices = [[p[0], p[1], p[2]] for p in control_points]
+                    local_normals = [[0.0, 0.0, 0.0] for _ in local_vertices]
+                    local_indices = []
 
                     for j in range(mesh.GetPolygonCount()):
                         poly_size = mesh.GetPolygonSize(j)
-                        for k in range(poly_size):
-                            index = mesh.GetPolygonVertex(j, k)
-                            vertex = control_points[index]
-                            combined_vertices.append([vertex[0], vertex[1], vertex[2]])
-                            combined_indices.append(len(combined_indices))
-                            normal = mesh.GetPolygonVertexNormal(j, k)
-                            combined_normals.append([normal[0], normal[1], normal[2]])
+                        polygon = [mesh.GetPolygonVertex(j, k) for k in range(poly_size)]
+                        if poly_size < 3:
+                            continue
+
+                        for k in range(1, poly_size - 1):
+                            tri = (polygon[0], polygon[k], polygon[k + 1])
+                            local_indices.extend(tri)
+
+                            v0 = np.array(local_vertices[tri[0]], dtype=np.float32)
+                            v1 = np.array(local_vertices[tri[1]], dtype=np.float32)
+                            v2 = np.array(local_vertices[tri[2]], dtype=np.float32)
+                            normal = np.cross(v1 - v0, v2 - v0)
+
+                            for idx in tri:
+                                local_normals[idx][0] += float(normal[0])
+                                local_normals[idx][1] += float(normal[1])
+                                local_normals[idx][2] += float(normal[2])
+
+                    local_normals_np = np.array(local_normals, dtype=np.float32)
+                    lengths = np.linalg.norm(local_normals_np, axis=1)
+                    valid = lengths > 0
+                    local_normals_np[valid] /= lengths[valid][:, None]
+
+                    combined_vertices.extend(local_vertices)
+                    combined_normals.extend(local_normals_np.tolist())
+                    combined_indices.extend((np.array(local_indices, dtype=np.uint32) + vertex_offset).tolist())
+                    vertex_offset += len(local_vertices)
 
         return combined_vertices, combined_indices, combined_normals
 
     def process_mesh_data(self, vertices, indices, normals):
         vertices = np.array(vertices, dtype=np.float32)
-        indices = np.array(indices, dtype=np.uint32)
+        indices = np.array(indices, dtype=np.uint32).reshape(-1)
         normals = np.array(normals, dtype=np.float32)
+
+        if vertices.size == 0 or indices.size == 0:
+            return (
+                np.array([], dtype=np.float32),
+                np.array([], dtype=np.uint32),
+                np.array([], dtype=np.float32),
+            )
+
+        if normals.size == 0 or normals.shape[0] != vertices.shape[0]:
+            normals = np.zeros_like(vertices, dtype=np.float32)
+            flat_indices = indices.reshape(-1, 3)
+            for i0, i1, i2 in flat_indices:
+                v0 = vertices[i0]
+                v1 = vertices[i1]
+                v2 = vertices[i2]
+                normal = np.cross(v1 - v0, v2 - v0)
+                normals[i0] += normal
+                normals[i1] += normal
+                normals[i2] += normal
+
+            lengths = np.linalg.norm(normals, axis=1)
+            valid = lengths > 0
+            normals[valid] /= lengths[valid][:, None]
 
         centroid = vertices.mean(axis=0)
         vertices -= centroid
         max_extent = np.max(np.linalg.norm(vertices, axis=1))
-        vertices /= max_extent
+        if max_extent > 0:
+            vertices /= max_extent
 
         return vertices, indices, normals
 
     def resizeGL(self, w: int, h: int):
+        h = max(h, 1)
         glViewport(0, 0, w, h)
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
@@ -200,6 +265,11 @@ class OpenGLWidget(QOpenGLWidget):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glLoadIdentity()
         gluLookAt(0, 0, 3 / self.zoom, 0, 0, 0, 0, 1, 0)
+
+        # Light positions are transformed by current modelview matrix at call time.
+        glLightfv(GL_LIGHT0, GL_POSITION, self.light_positions[0])
+        glLightfv(GL_LIGHT1, GL_POSITION, self.light_positions[1])
+
         glRotatef(self.angle_x, 1, 0, 0)
         glRotatef(self.angle_y, 0, 1, 0)
 
@@ -209,15 +279,16 @@ class OpenGLWidget(QOpenGLWidget):
             glEnableClientState(GL_NORMAL_ARRAY)
             glVertexPointer(3, GL_FLOAT, 0, self.vertices)
             glNormalPointer(GL_FLOAT, 0, self.normals)
-            glDrawElements(GL_TRIANGLES, len(self.indices), GL_UNSIGNED_INT, self.indices)
+            glDrawElements(GL_TRIANGLES, int(self.indices.size), GL_UNSIGNED_INT, self.indices)
             glDisableClientState(GL_VERTEX_ARRAY)
             glDisableClientState(GL_NORMAL_ARRAY)
             glDisable(GL_LIGHTING)
 
-        glDisable(GL_LIGHTING)
-        glColor3f(1.0, 1.0, 0.0)
-        for pos in self.light_positions:
-            self.draw_cube(pos)
+        if self.show_light_markers:
+            glDisable(GL_LIGHTING)
+            glColor3f(1.0, 1.0, 0.0)
+            for pos in self.light_positions:
+                self.draw_cube(pos)
 
     def draw_cube(self, position):
         glPushMatrix()
