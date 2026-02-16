@@ -1,17 +1,19 @@
 import os
+from PyQt5.QtCore import QSettings, Qt
 from PyQt5.QtWidgets import (
-    QMainWindow,
-    QPushButton,
-    QVBoxLayout,
-    QHBoxLayout,
-    QWidget,
     QFileDialog,
+    QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMainWindow,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt5.QtCore import Qt, QSettings
-from opengl_widget import OpenGLWidget
+
+from viewer.ui.opengl_widget import OpenGLWidget
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -30,7 +32,6 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
 
         root_layout = QHBoxLayout(central_widget)
-
         browser_panel = QWidget(self)
         browser_panel.setFixedWidth(320)
         panel_layout = QVBoxLayout(browser_panel)
@@ -55,7 +56,6 @@ class MainWindow(QMainWindow):
         prev_button = QPushButton("Предыдущая", self)
         prev_button.clicked.connect(self.show_previous_model)
         nav_layout.addWidget(prev_button)
-
         next_button = QPushButton("Следующая", self)
         next_button.clicked.connect(self.show_next_model)
         nav_layout.addWidget(next_button)
@@ -120,8 +120,19 @@ class MainWindow(QMainWindow):
         file_path = self.model_files[row]
         loaded = self.gl_widget.load_mesh(file_path)
         if loaded:
-            self.status_label.setText(f"Открыт файл: {os.path.basename(file_path)} ({row + 1}/{len(self.model_files)})")
+            debug = self.gl_widget.last_debug_info or {}
+            uv_count = debug.get("uv_count", 0)
+            tex_count = debug.get("texture_candidates_count", 0)
+            tex_file = os.path.basename(self.gl_widget.last_texture_path) if self.gl_widget.last_texture_path else "не выбрана"
+            preview = "unlit" if self.gl_widget.unlit_texture_preview else "lit"
+            self.status_label.setText(
+                f"Открыт: {os.path.basename(file_path)} ({row + 1}/{len(self.model_files)}) | "
+                f"UV: {uv_count} | Текстур-кандидатов: {tex_count} | Текстура: {tex_file} | {preview}"
+            )
             self.setWindowTitle(f"3D Viewer - {os.path.basename(file_path)}")
+            if file_path.lower().endswith(".fbx"):
+                print("[FBX DEBUG]", debug)
+                print("[FBX DEBUG] selected_texture:", self.gl_widget.last_texture_path or "<none>")
         else:
             self.status_label.setText(f"Ошибка: {self.gl_widget.last_error}")
 
@@ -155,6 +166,11 @@ class MainWindow(QMainWindow):
             return
         if event.key() in (Qt.Key_PageDown, Qt.Key_D):
             self.show_next_model()
+            return
+        if event.key() == Qt.Key_L:
+            self.gl_widget.unlit_texture_preview = not self.gl_widget.unlit_texture_preview
+            row = self.model_list.currentRow()
+            self._load_model_at_row(row)
             return
 
         key_mappings = {

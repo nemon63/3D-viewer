@@ -76,7 +76,7 @@ try:
 except ImportError:
     Image = None
 
-from model_loader import load_model_payload
+from viewer.loaders.model_loader import load_model_payload
 
 
 class OpenGLWidget(QOpenGLWidget):
@@ -92,8 +92,11 @@ class OpenGLWidget(QOpenGLWidget):
         self.normals = np.array([], dtype=np.float32)
         self.texcoords = np.array([], dtype=np.float32)
         self.texture_id = 0
+        self.last_texture_path = ""
+        self.last_debug_info = {}
         self.last_error = ""
 
+        self.unlit_texture_preview = True
         self.light_positions = [
             [1.0, 1.0, 1.0, 1.0],
             [-1.0, 1.0, 1.0, 1.0],
@@ -118,12 +121,12 @@ class OpenGLWidget(QOpenGLWidget):
 
         glEnable(GL_LIGHT1)
         glLightfv(GL_LIGHT1, GL_POSITION, self.light_positions[1])
-        glLightfv(GL_LIGHT1, GL_DIFFUSE, [0.5, 0.5, 0.5, 1.0])
-        glLightfv(GL_LIGHT1, GL_SPECULAR, [0.5, 0.5, 0.5, 1.0])
+        glLightfv(GL_LIGHT1, GL_DIFFUSE, [0.6, 0.6, 0.6, 1.0])
+        glLightfv(GL_LIGHT1, GL_SPECULAR, [0.6, 0.6, 0.6, 1.0])
 
-        glMaterialfv(GL_FRONT, GL_AMBIENT_AND_DIFFUSE, [0.7, 0.7, 0.7, 1.0])
-        glMaterialfv(GL_FRONT, GL_SPECULAR, [1.0, 1.0, 1.0, 1.0])
-        glMaterialf(GL_FRONT, GL_SHININESS, 50.0)
+        glMaterialfv(GL_FRONT, GL_AMBIENT_AND_DIFFUSE, [1.0, 1.0, 1.0, 1.0])
+        glMaterialfv(GL_FRONT, GL_SPECULAR, [0.6, 0.6, 0.6, 1.0])
+        glMaterialf(GL_FRONT, GL_SHININESS, 24.0)
 
     def load_mesh(self, file_path: str) -> bool:
         try:
@@ -133,6 +136,8 @@ class OpenGLWidget(QOpenGLWidget):
             self.indices = payload.indices
             self.normals = payload.normals
             self.texcoords = payload.texcoords
+            self.last_debug_info = payload.debug_info or {}
+            self.last_texture_path = ""
 
             if self.texcoords.size > 0:
                 self._load_first_texture(payload.texture_candidates)
@@ -148,6 +153,8 @@ class OpenGLWidget(QOpenGLWidget):
             self.indices = np.array([], dtype=np.uint32)
             self.normals = np.array([], dtype=np.float32)
             self.texcoords = np.array([], dtype=np.float32)
+            self.last_texture_path = ""
+            self.last_debug_info = {}
             self.last_error = str(exc)
             self.update()
             return False
@@ -174,17 +181,23 @@ class OpenGLWidget(QOpenGLWidget):
         glRotatef(self.angle_y, 0, 1, 0)
 
         if self.vertices.size > 0 and self.indices.size > 0:
-            glEnable(GL_LIGHTING)
-            glEnableClientState(GL_VERTEX_ARRAY)
-            glEnableClientState(GL_NORMAL_ARRAY)
-            glVertexPointer(3, GL_FLOAT, 0, self.vertices)
-            glNormalPointer(GL_FLOAT, 0, self.normals)
-
             has_texture = (
                 self.texture_id != 0
                 and self.texcoords.size > 0
                 and self.texcoords.shape[0] == self.vertices.shape[0]
             )
+
+            use_lighting = not (has_texture and self.unlit_texture_preview)
+            if use_lighting:
+                glEnable(GL_LIGHTING)
+                glEnableClientState(GL_NORMAL_ARRAY)
+                glNormalPointer(GL_FLOAT, 0, self.normals)
+            else:
+                glDisable(GL_LIGHTING)
+
+            glEnableClientState(GL_VERTEX_ARRAY)
+            glVertexPointer(3, GL_FLOAT, 0, self.vertices)
+
             if has_texture:
                 glEnable(GL_TEXTURE_2D)
                 glBindTexture(GL_TEXTURE_2D, self.texture_id)
@@ -199,8 +212,9 @@ class OpenGLWidget(QOpenGLWidget):
                 glDisable(GL_TEXTURE_2D)
 
             glDisableClientState(GL_VERTEX_ARRAY)
-            glDisableClientState(GL_NORMAL_ARRAY)
-            glDisable(GL_LIGHTING)
+            if use_lighting:
+                glDisableClientState(GL_NORMAL_ARRAY)
+                glDisable(GL_LIGHTING)
 
         if self.show_light_markers:
             glDisable(GL_LIGHTING)
@@ -279,6 +293,7 @@ class OpenGLWidget(QOpenGLWidget):
             try:
                 with Image.open(path) as img:
                     self._upload_texture_image(img.copy())
+                self.last_texture_path = path
                 return
             except Exception:
                 continue
@@ -290,6 +305,8 @@ class OpenGLWidget(QOpenGLWidget):
         if isinstance(image, np.ndarray):
             arr = image
         elif Image is not None and isinstance(image, Image.Image):
+            if image.mode not in ("RGB", "RGBA"):
+                image = image.convert("RGBA")
             arr = np.array(image, dtype=np.uint8)
         else:
             arr = np.array(image)
