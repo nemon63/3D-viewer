@@ -228,21 +228,25 @@ class MainWindow(QMainWindow):
             combo.blockSignals(False)
 
     def _on_material_channel_changed(self, channel):
-        if channel == "basecolor":
-            self._apply_channel_texture("basecolor")
+        self._apply_channel_texture(channel)
 
     def _apply_preview_channel(self):
         channel = self.preview_channel_combo.currentData()
-        self._apply_channel_texture(channel)
+        combo = self.material_boxes.get(channel)
+        if combo is None:
+            return
+        path = combo.currentData()
+        if path:
+            self.gl_widget.apply_texture_path("basecolor", path)
+            self._update_status(self.model_list.currentRow())
 
     def _apply_channel_texture(self, channel):
         combo = self.material_boxes.get(channel)
         if combo is None:
             return
         path = combo.currentData()
-        if path:
-            self.gl_widget.apply_texture_path(path)
-            self._update_status(self.model_list.currentRow())
+        self.gl_widget.apply_texture_path(channel, path or "")
+        self._update_status(self.model_list.currentRow())
 
     def _update_status(self, row):
         if row < 0 or row >= len(self.model_files):

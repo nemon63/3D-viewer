@@ -1,76 +1,68 @@
-import numpy as np
 import os
+
+import numpy as np
 from PyQt5.QtCore import QPoint, Qt
 from PyQt5.QtWidgets import QOpenGLWidget
 from OpenGL.GL import (
-    GL_AMBIENT_AND_DIFFUSE,
     GL_COLOR_BUFFER_BIT,
-    GL_COLOR_MATERIAL,
     GL_DEPTH_BUFFER_BIT,
     GL_DEPTH_TEST,
-    GL_DIFFUSE,
+    GL_FALSE,
     GL_FLOAT,
-    GL_FRONT,
-    GL_LIGHT0,
-    GL_LIGHT1,
-    GL_LIGHTING,
+    GL_FRAGMENT_SHADER,
     GL_LINEAR,
-    GL_MODELVIEW,
-    GL_NORMAL_ARRAY,
-    GL_NORMALIZE,
-    GL_POSITION,
-    GL_PROJECTION,
-    GL_QUADS,
     GL_REPEAT,
     GL_RGB,
     GL_RGBA,
-    GL_SHININESS,
-    GL_SMOOTH,
-    GL_SPECULAR,
+    GL_TEXTURE0,
+    GL_TEXTURE1,
+    GL_TEXTURE2,
+    GL_TEXTURE3,
     GL_TEXTURE_2D,
-    GL_TEXTURE_COORD_ARRAY,
     GL_TEXTURE_MAG_FILTER,
     GL_TEXTURE_MIN_FILTER,
     GL_TEXTURE_WRAP_S,
     GL_TEXTURE_WRAP_T,
     GL_TRIANGLES,
+    GL_UNPACK_ALIGNMENT,
     GL_UNSIGNED_BYTE,
     GL_UNSIGNED_INT,
-    GL_UNPACK_ALIGNMENT,
-    GL_VERTEX_ARRAY,
-    glBegin,
+    GL_VERTEX_SHADER,
+    glActiveTexture,
     glBindTexture,
     glClear,
     glClearColor,
-    glColor3f,
+    glDeleteProgram,
     glDeleteTextures,
     glDisable,
     glDisableClientState,
     glDrawElements,
     glEnable,
     glEnableClientState,
-    glEnd,
     glGenTextures,
-    glLightfv,
+    glGetUniformLocation,
     glLoadIdentity,
-    glMaterialf,
-    glMaterialfv,
     glMatrixMode,
     glNormalPointer,
     glPixelStorei,
-    glPopMatrix,
-    glPushMatrix,
     glRotatef,
-    glShadeModel,
     glTexCoordPointer,
     glTexImage2D,
     glTexParameteri,
-    glTranslatef,
-    glVertex3f,
+    glUniform1f,
+    glUniform1i,
+    glUniform3f,
+    glUseProgram,
     glVertexPointer,
     glViewport,
+    GL_MODELVIEW,
+    GL_PROJECTION,
+    GL_NORMAL_ARRAY,
+    GL_TEXTURE_COORD_ARRAY,
+    GL_VERTEX_ARRAY,
 )
 from OpenGL.GLU import gluLookAt, gluPerspective
+from OpenGL.GL.shaders import compileProgram, compileShader
 
 try:
     from PIL import Image
@@ -78,6 +70,145 @@ except ImportError:
     Image = None
 
 from viewer.loaders.model_loader import load_model_payload
+
+CHANNEL_BASE = "basecolor"
+CHANNEL_METAL = "metal"
+CHANNEL_ROUGH = "roughness"
+CHANNEL_NORMAL = "normal"
+ALL_CHANNELS = (CHANNEL_BASE, CHANNEL_METAL, CHANNEL_ROUGH, CHANNEL_NORMAL)
+
+
+VERTEX_SHADER_SRC = """
+#version 120
+varying vec3 vPosView;
+varying vec3 vNormalView;
+varying vec2 vUv;
+
+void main() {
+    vec4 posView = gl_ModelViewMatrix * gl_Vertex;
+    vPosView = posView.xyz;
+    vNormalView = normalize(gl_NormalMatrix * gl_Normal);
+    vUv = gl_MultiTexCoord0.xy;
+    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+}
+"""
+
+
+FRAGMENT_SHADER_SRC = """
+#version 120
+varying vec3 vPosView;
+varying vec3 vNormalView;
+varying vec2 vUv;
+
+uniform vec3 uLightPosView0;
+uniform vec3 uLightPosView1;
+uniform vec3 uLightColor0;
+uniform vec3 uLightColor1;
+
+uniform sampler2D uBaseColorTex;
+uniform sampler2D uMetalTex;
+uniform sampler2D uRoughTex;
+uniform sampler2D uNormalTex;
+
+uniform int uHasBase;
+uniform int uHasMetal;
+uniform int uHasRough;
+uniform int uHasNormal;
+uniform int uUnlitTexturePreview;
+uniform int uUseAlphaCutout;
+uniform float uAlphaCutoff;
+
+float DistributionGGX(vec3 N, vec3 H, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = max(dot(N, H), 0.0);
+    float NdotH2 = NdotH * NdotH;
+    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+    denom = 3.14159265 * denom * denom;
+    return a2 / max(denom, 0.0001);
+}
+
+float GeometrySchlickGGX(float NdotV, float roughness) {
+    float r = roughness + 1.0;
+    float k = (r * r) / 8.0;
+    float denom = NdotV * (1.0 - k) + k;
+    return NdotV / max(denom, 0.0001);
+}
+
+float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = max(dot(N, L), 0.0);
+    float ggx2 = GeometrySchlickGGX(NdotV, roughness);
+    float ggx1 = GeometrySchlickGGX(NdotL, roughness);
+    return ggx1 * ggx2;
+}
+
+vec3 fresnelSchlick(float cosTheta, vec3 F0) {
+    return F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+}
+
+vec3 computeLight(vec3 N, vec3 V, vec3 albedo, float metallic, float roughness, vec3 F0, vec3 lightPos, vec3 lightColor) {
+    vec3 L = normalize(lightPos - vPosView);
+    vec3 H = normalize(V + L);
+    float dist = length(lightPos - vPosView);
+    float attenuation = 1.0 / max(dist * dist, 0.0001);
+    vec3 radiance = lightColor * attenuation;
+
+    float NDF = DistributionGGX(N, H, roughness);
+    float G = GeometrySmith(N, V, L, roughness);
+    vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+
+    vec3 numerator = NDF * G * F;
+    float denom = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
+    vec3 specular = numerator / denom;
+
+    vec3 kS = F;
+    vec3 kD = (vec3(1.0) - kS) * (1.0 - metallic);
+    float NdotL = max(dot(N, L), 0.0);
+    return (kD * albedo / 3.14159265 + specular) * radiance * NdotL;
+}
+
+void main() {
+    vec4 baseSample = (uHasBase == 1) ? texture2D(uBaseColorTex, vUv) : vec4(0.75, 0.75, 0.75, 1.0);
+    vec3 base = baseSample.rgb;
+    float alpha = baseSample.a;
+
+    if (uUseAlphaCutout == 1 && alpha < uAlphaCutoff) {
+        discard;
+    }
+    float metallic = (uHasMetal == 1) ? texture2D(uMetalTex, vUv).r : 0.0;
+    float roughness = (uHasRough == 1) ? texture2D(uRoughTex, vUv).r : 0.55;
+    roughness = clamp(roughness, 0.05, 1.0);
+    metallic = clamp(metallic, 0.0, 1.0);
+
+    vec3 N = normalize(vNormalView);
+    if (uHasNormal == 1) {
+        vec3 nMap = texture2D(uNormalTex, vUv).xyz * 2.0 - 1.0;
+        // Tangent space is not available in this fixed-function bridge, so apply as soft perturbation.
+        N = normalize(mix(N, normalize(vec3(nMap.xy, abs(nMap.z))), 0.35));
+    }
+
+    if (uUnlitTexturePreview == 1 && uHasBase == 1) {
+        gl_FragColor = vec4(pow(base, vec3(1.0 / 2.2)), alpha);
+        return;
+    }
+
+    vec3 V = normalize(-vPosView);
+    vec3 F0 = mix(vec3(0.04), base, metallic);
+
+    vec3 Lo = vec3(0.0);
+    Lo += computeLight(N, V, base, metallic, roughness, F0, uLightPosView0, uLightColor0);
+    Lo += computeLight(N, V, base, metallic, roughness, F0, uLightPosView1, uLightColor1);
+
+    vec3 ambient = vec3(0.03) * base;
+    vec3 color = ambient + Lo;
+
+    // Simple filmic tonemap + gamma
+    color = color / (color + vec3(1.0));
+    color = pow(color, vec3(1.0 / 2.2));
+    gl_FragColor = vec4(color, alpha);
+}
+"""
 
 
 class OpenGLWidget(QOpenGLWidget):
@@ -92,47 +223,41 @@ class OpenGLWidget(QOpenGLWidget):
         self.indices = np.array([], dtype=np.uint32)
         self.normals = np.array([], dtype=np.float32)
         self.texcoords = np.array([], dtype=np.float32)
-        self.texture_id = 0
+
+        self.shader_program = None
+        self.texture_ids = {ch: 0 for ch in ALL_CHANNELS}
         self.last_texture_path = ""
+        self.last_texture_paths = {ch: "" for ch in ALL_CHANNELS}
+        self.base_texture_has_alpha = False
         self.last_texture_sets = {}
         self.last_debug_info = {}
         self.last_error = ""
 
-        self.unlit_texture_preview = True
+        self.unlit_texture_preview = False
         self.light_positions = [
-            [1.0, 1.0, 1.0, 1.0],
-            [-1.0, 1.0, 1.0, 1.0],
+            [1.8, 1.2, 2.0],
+            [-1.6, 1.0, 1.8],
         ]
-        self.show_light_markers = False
+        self.light_colors = [
+            [12.0, 12.0, 12.0],
+            [7.0, 7.0, 7.0],
+        ]
+        self.alpha_cutoff = 0.5
 
     def initializeGL(self):
         glEnable(GL_DEPTH_TEST)
-        glShadeModel(GL_SMOOTH)
-        glEnable(GL_LIGHTING)
-        glEnable(GL_NORMALIZE)
-        glEnable(GL_COLOR_MATERIAL)
-        glEnable(GL_TEXTURE_2D)
         glClearColor(0.0, 0.0, 0.0, 1.0)
-        self.setup_lighting()
+        self._init_shaders()
 
-    def setup_lighting(self):
-        glEnable(GL_LIGHT0)
-        glLightfv(GL_LIGHT0, GL_POSITION, self.light_positions[0])
-        glLightfv(GL_LIGHT0, GL_DIFFUSE, [1.0, 1.0, 1.0, 1.0])
-        glLightfv(GL_LIGHT0, GL_SPECULAR, [1.0, 1.0, 1.0, 1.0])
-
-        glEnable(GL_LIGHT1)
-        glLightfv(GL_LIGHT1, GL_POSITION, self.light_positions[1])
-        glLightfv(GL_LIGHT1, GL_DIFFUSE, [0.6, 0.6, 0.6, 1.0])
-        glLightfv(GL_LIGHT1, GL_SPECULAR, [0.6, 0.6, 0.6, 1.0])
-
-        glMaterialfv(GL_FRONT, GL_AMBIENT_AND_DIFFUSE, [1.0, 1.0, 1.0, 1.0])
-        glMaterialfv(GL_FRONT, GL_SPECULAR, [0.6, 0.6, 0.6, 1.0])
-        glMaterialf(GL_FRONT, GL_SHININESS, 24.0)
+    def _init_shaders(self):
+        self.shader_program = compileProgram(
+            compileShader(VERTEX_SHADER_SRC, GL_VERTEX_SHADER),
+            compileShader(FRAGMENT_SHADER_SRC, GL_FRAGMENT_SHADER),
+        )
 
     def load_mesh(self, file_path: str) -> bool:
         try:
-            self._clear_texture()
+            self._clear_all_textures()
             payload = load_model_payload(file_path)
             self.vertices = payload.vertices
             self.indices = payload.indices
@@ -143,7 +268,7 @@ class OpenGLWidget(QOpenGLWidget):
             self.last_texture_path = ""
 
             if self.texcoords.size > 0:
-                self._load_default_texture(payload.texture_candidates)
+                self._apply_default_texture_set()
 
             if self.vertices.size == 0 or self.indices.size == 0:
                 raise RuntimeError("Model does not contain valid geometry.")
@@ -163,109 +288,111 @@ class OpenGLWidget(QOpenGLWidget):
             self.update()
             return False
 
+    def _apply_default_texture_set(self):
+        for ch in ALL_CHANNELS:
+            paths = self.last_texture_sets.get(ch, [])
+            if paths:
+                self.apply_texture_path(ch, paths[0])
+
+        self.last_texture_path = self.last_texture_paths.get(CHANNEL_BASE, "")
+
     def resizeGL(self, w: int, h: int):
         h = max(h, 1)
         glViewport(0, 0, w, h)
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
         gluPerspective(45.0, w / h, 0.1, 100.0)
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
-        gluLookAt(0, 0, 3 / self.zoom, 0, 0, 0, 0, 1, 0)
 
     def paintGL(self):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
         gluLookAt(0, 0, 3 / self.zoom, 0, 0, 0, 0, 1, 0)
-
-        glLightfv(GL_LIGHT0, GL_POSITION, self.light_positions[0])
-        glLightfv(GL_LIGHT1, GL_POSITION, self.light_positions[1])
-
         glRotatef(self.angle_x, 1, 0, 0)
         glRotatef(self.angle_y, 0, 1, 0)
 
-        if self.vertices.size > 0 and self.indices.size > 0:
-            has_texture = (
-                self.texture_id != 0
-                and self.texcoords.size > 0
-                and self.texcoords.shape[0] == self.vertices.shape[0]
-            )
+        if self.vertices.size == 0 or self.indices.size == 0 or self.shader_program is None:
+            return
 
-            use_lighting = not (has_texture and self.unlit_texture_preview)
-            if use_lighting:
-                glEnable(GL_LIGHTING)
-                glEnableClientState(GL_NORMAL_ARRAY)
-                glNormalPointer(GL_FLOAT, 0, self.normals)
-            else:
-                glDisable(GL_LIGHTING)
+        glUseProgram(self.shader_program)
+        try:
+            self._set_shader_uniforms()
+            self._draw_mesh()
+        finally:
+            glUseProgram(0)
 
-            glEnableClientState(GL_VERTEX_ARRAY)
-            glVertexPointer(3, GL_FLOAT, 0, self.vertices)
+    def _set_shader_uniforms(self):
+        self._set_sampler_uniform("uBaseColorTex", 0)
+        self._set_sampler_uniform("uMetalTex", 1)
+        self._set_sampler_uniform("uRoughTex", 2)
+        self._set_sampler_uniform("uNormalTex", 3)
 
-            if has_texture:
-                glEnable(GL_TEXTURE_2D)
-                glBindTexture(GL_TEXTURE_2D, self.texture_id)
-                glEnableClientState(GL_TEXTURE_COORD_ARRAY)
-                glTexCoordPointer(2, GL_FLOAT, 0, self.texcoords)
+        self._bind_texture_unit(0, self.texture_ids[CHANNEL_BASE])
+        self._bind_texture_unit(1, self.texture_ids[CHANNEL_METAL])
+        self._bind_texture_unit(2, self.texture_ids[CHANNEL_ROUGH])
+        self._bind_texture_unit(3, self.texture_ids[CHANNEL_NORMAL])
 
-            glDrawElements(GL_TRIANGLES, int(self.indices.size), GL_UNSIGNED_INT, self.indices)
+        self._set_int_uniform("uHasBase", 1 if self.texture_ids[CHANNEL_BASE] else 0)
+        self._set_int_uniform("uHasMetal", 1 if self.texture_ids[CHANNEL_METAL] else 0)
+        self._set_int_uniform("uHasRough", 1 if self.texture_ids[CHANNEL_ROUGH] else 0)
+        self._set_int_uniform("uHasNormal", 1 if self.texture_ids[CHANNEL_NORMAL] else 0)
+        self._set_int_uniform("uUnlitTexturePreview", 1 if self.unlit_texture_preview else 0)
+        self._set_int_uniform("uUseAlphaCutout", 1 if self.base_texture_has_alpha else 0)
+        self._set_float_uniform("uAlphaCutoff", self.alpha_cutoff)
 
-            if has_texture:
-                glDisableClientState(GL_TEXTURE_COORD_ARRAY)
-                glBindTexture(GL_TEXTURE_2D, 0)
-                glDisable(GL_TEXTURE_2D)
+        self._set_vec3_uniform("uLightPosView0", *self.light_positions[0])
+        self._set_vec3_uniform("uLightPosView1", *self.light_positions[1])
+        self._set_vec3_uniform("uLightColor0", *self.light_colors[0])
+        self._set_vec3_uniform("uLightColor1", *self.light_colors[1])
 
-            glDisableClientState(GL_VERTEX_ARRAY)
-            if use_lighting:
-                glDisableClientState(GL_NORMAL_ARRAY)
-                glDisable(GL_LIGHTING)
+    def _draw_mesh(self):
+        glEnableClientState(GL_VERTEX_ARRAY)
+        glVertexPointer(3, GL_FLOAT, 0, self.vertices)
 
-        if self.show_light_markers:
-            glDisable(GL_LIGHTING)
-            glColor3f(1.0, 1.0, 0.0)
-            for pos in self.light_positions:
-                self.draw_cube(pos)
+        glEnableClientState(GL_NORMAL_ARRAY)
+        glNormalPointer(GL_FLOAT, 0, self.normals)
 
-    def draw_cube(self, position):
-        glPushMatrix()
-        glTranslatef(position[0], position[1], position[2])
-        size = 0.05
-        glBegin(GL_QUADS)
-        self.draw_cube_face(-size, size, size)
-        self.draw_cube_face(-size, size, -size)
-        self.draw_cube_face(size, size, -size, is_top=True)
-        self.draw_cube_face(size, -size, -size, is_bottom=True)
-        self.draw_cube_face(size, size, size, is_right=True)
-        self.draw_cube_face(-size, size, size, is_left=True)
-        glEnd()
-        glPopMatrix()
+        has_uv = self.texcoords.size > 0 and self.texcoords.shape[0] == self.vertices.shape[0]
+        if has_uv:
+            glEnableClientState(GL_TEXTURE_COORD_ARRAY)
+            glTexCoordPointer(2, GL_FLOAT, 0, self.texcoords)
 
-    def draw_cube_face(self, x1, x2, z, is_top=False, is_bottom=False, is_right=False, is_left=False):
-        if is_top:
-            glVertex3f(x1, x2, -z)
-            glVertex3f(x1, x2, z)
-            glVertex3f(x2, x2, z)
-            glVertex3f(x2, x2, -z)
-        elif is_bottom:
-            glVertex3f(x1, -x2, -z)
-            glVertex3f(x2, -x2, -z)
-            glVertex3f(x2, -x2, z)
-            glVertex3f(x1, -x2, z)
-        elif is_right:
-            glVertex3f(x2, -x1, -z)
-            glVertex3f(x2, x1, -z)
-            glVertex3f(x2, x1, z)
-            glVertex3f(x2, -x1, z)
-        elif is_left:
-            glVertex3f(-x2, -x1, -z)
-            glVertex3f(-x2, -x1, z)
-            glVertex3f(-x2, x1, z)
-            glVertex3f(-x2, x1, -z)
-        else:
-            glVertex3f(x1, -x2, z)
-            glVertex3f(x2, -x2, z)
-            glVertex3f(x2, x2, z)
-            glVertex3f(x1, x2, z)
+        glDrawElements(GL_TRIANGLES, int(self.indices.size), GL_UNSIGNED_INT, self.indices)
+
+        if has_uv:
+            glDisableClientState(GL_TEXTURE_COORD_ARRAY)
+        glDisableClientState(GL_NORMAL_ARRAY)
+        glDisableClientState(GL_VERTEX_ARRAY)
+
+        # Unbind texture units
+        for unit in (GL_TEXTURE0, GL_TEXTURE1, GL_TEXTURE2, GL_TEXTURE3):
+            glActiveTexture(unit)
+            glBindTexture(GL_TEXTURE_2D, 0)
+
+    def _set_sampler_uniform(self, name, value):
+        location = glGetUniformLocation(self.shader_program, name)
+        if location != -1:
+            glUniform1i(location, value)
+
+    def _set_int_uniform(self, name, value):
+        location = glGetUniformLocation(self.shader_program, name)
+        if location != -1:
+            glUniform1i(location, int(value))
+
+    def _set_float_uniform(self, name, value):
+        location = glGetUniformLocation(self.shader_program, name)
+        if location != -1:
+            glUniform1f(location, float(value))
+
+    def _set_vec3_uniform(self, name, x, y, z):
+        location = glGetUniformLocation(self.shader_program, name)
+        if location != -1:
+            glUniform3f(location, float(x), float(y), float(z))
+
+    def _bind_texture_unit(self, slot: int, texture_id: int):
+        active = [GL_TEXTURE0, GL_TEXTURE1, GL_TEXTURE2, GL_TEXTURE3][slot]
+        glActiveTexture(active)
+        glBindTexture(GL_TEXTURE_2D, int(texture_id) if texture_id else 0)
 
     def mousePressEvent(self, event):
         self.last_mouse_pos = event.pos()
@@ -290,34 +417,46 @@ class OpenGLWidget(QOpenGLWidget):
         self.angle_y = angle_y
         self.update()
 
-    def _load_default_texture(self, texture_candidates):
-        basecolor_candidates = self.last_texture_sets.get("basecolor", [])
-        if basecolor_candidates and self.apply_texture_path(basecolor_candidates[0]):
-            return
-        self._load_first_texture(texture_candidates)
-
-    def _load_first_texture(self, texture_candidates):
-        if Image is None:
-            return
-        for path in texture_candidates:
-            if self.apply_texture_path(path):
-                return
-
-    def apply_texture_path(self, path: str) -> bool:
-        if Image is None or not path or not os.path.isfile(path):
+    def apply_texture_path(self, channel: str, path: str) -> bool:
+        if channel not in ALL_CHANNELS:
             return False
+        if Image is None:
+            return False
+        if not path:
+            self._clear_channel_texture(channel)
+            self.update()
+            return True
+        if not os.path.isfile(path):
+            return False
+
         try:
             with Image.open(path) as img:
-                self._upload_texture_image(img.copy())
-            self.last_texture_path = path
+                image_copy = img.copy()
+                has_alpha = image_copy.mode in ("RGBA", "LA") or ("transparency" in image_copy.info)
+                texture_id = self._upload_texture_image(image_copy, old_texture_id=self.texture_ids[channel])
+            self.texture_ids[channel] = texture_id
+            self.last_texture_paths[channel] = path
+            if channel == CHANNEL_BASE:
+                self.last_texture_path = path
+                self.base_texture_has_alpha = has_alpha
             self.update()
             return True
         except Exception:
             return False
 
-    def _upload_texture_image(self, image):
+    def _clear_channel_texture(self, channel: str):
+        tex_id = self.texture_ids.get(channel, 0)
+        if tex_id:
+            self._delete_texture_id(tex_id)
+            self.texture_ids[channel] = 0
+            self.last_texture_paths[channel] = ""
+            if channel == CHANNEL_BASE:
+                self.last_texture_path = ""
+                self.base_texture_has_alpha = False
+
+    def _upload_texture_image(self, image, old_texture_id=0):
         if image is None:
-            return
+            raise RuntimeError("Texture image is empty.")
 
         if isinstance(image, np.ndarray):
             arr = image
@@ -329,7 +468,7 @@ class OpenGLWidget(QOpenGLWidget):
             arr = np.array(image)
 
         if arr.ndim != 3:
-            return
+            raise RuntimeError("Texture must be RGB/RGBA.")
 
         arr = np.flipud(arr)
         if arr.dtype != np.uint8:
@@ -341,17 +480,19 @@ class OpenGLWidget(QOpenGLWidget):
         elif channels == 4:
             image_format = GL_RGBA
         else:
-            return
+            raise RuntimeError("Texture must have 3 or 4 channels.")
 
         self.makeCurrent()
         try:
-            self._clear_texture(already_current=True)
+            if old_texture_id:
+                glDeleteTextures([int(old_texture_id)])
+
             texture_id = glGenTextures(1)
             if isinstance(texture_id, (tuple, list)):
                 texture_id = int(texture_id[0])
-            self.texture_id = int(texture_id)
+            texture_id = int(texture_id)
 
-            glBindTexture(GL_TEXTURE_2D, self.texture_id)
+            glBindTexture(GL_TEXTURE_2D, texture_id)
             glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
@@ -369,24 +510,33 @@ class OpenGLWidget(QOpenGLWidget):
                 arr,
             )
             glBindTexture(GL_TEXTURE_2D, 0)
+            return texture_id
         finally:
             self.doneCurrent()
 
-    def _clear_texture(self, already_current=False):
-        if not self.texture_id:
+    def _delete_texture_id(self, tex_id: int):
+        if not tex_id:
             return
         if self.context() is None:
-            self.texture_id = 0
             return
-
-        if already_current:
-            glDeleteTextures([int(self.texture_id)])
-            self.texture_id = 0
-            return
-
         self.makeCurrent()
         try:
-            glDeleteTextures([int(self.texture_id)])
-            self.texture_id = 0
+            glDeleteTextures([int(tex_id)])
         finally:
             self.doneCurrent()
+
+    def _clear_all_textures(self):
+        for ch in ALL_CHANNELS:
+            self._clear_channel_texture(ch)
+        self.last_texture_paths = {ch: "" for ch in ALL_CHANNELS}
+        self.last_texture_path = ""
+
+    def closeEvent(self, event):
+        self._clear_all_textures()
+        if self.shader_program:
+            try:
+                glDeleteProgram(self.shader_program)
+            except Exception:
+                pass
+            self.shader_program = None
+        super().closeEvent(event)
