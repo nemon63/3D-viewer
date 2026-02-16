@@ -1,5 +1,9 @@
+import os
+
+import numpy as np
+import trimesh
+from PyQt5.QtCore import QPoint, Qt
 from PyQt5.QtWidgets import QOpenGLWidget
-from PyQt5.QtCore import Qt, QPoint
 from OpenGL.GL import (
     GL_AMBIENT_AND_DIFFUSE,
     GL_COLOR_BUFFER_BIT,
@@ -12,46 +16,69 @@ from OpenGL.GL import (
     GL_LIGHT0,
     GL_LIGHT1,
     GL_LIGHTING,
+    GL_LINEAR,
     GL_MODELVIEW,
     GL_NORMAL_ARRAY,
     GL_NORMALIZE,
     GL_POSITION,
     GL_PROJECTION,
     GL_QUADS,
+    GL_REPEAT,
+    GL_RGB,
+    GL_RGBA,
     GL_SHININESS,
     GL_SMOOTH,
     GL_SPECULAR,
+    GL_TEXTURE_2D,
+    GL_TEXTURE_COORD_ARRAY,
+    GL_TEXTURE_MAG_FILTER,
+    GL_TEXTURE_MIN_FILTER,
+    GL_TEXTURE_WRAP_S,
+    GL_TEXTURE_WRAP_T,
     GL_TRIANGLES,
+    GL_UNSIGNED_BYTE,
     GL_UNSIGNED_INT,
+    GL_UNPACK_ALIGNMENT,
     GL_VERTEX_ARRAY,
     glBegin,
+    glBindTexture,
     glClear,
     glClearColor,
     glColor3f,
+    glDeleteTextures,
     glDisable,
     glDisableClientState,
     glDrawElements,
     glEnable,
     glEnableClientState,
     glEnd,
+    glGenTextures,
     glLightfv,
     glLoadIdentity,
     glMaterialf,
     glMaterialfv,
     glMatrixMode,
     glNormalPointer,
+    glPixelStorei,
     glPopMatrix,
     glPushMatrix,
     glRotatef,
     glShadeModel,
+    glTexCoordPointer,
+    glTexImage2D,
+    glTexParameteri,
     glTranslatef,
     glVertex3f,
     glVertexPointer,
     glViewport,
 )
 from OpenGL.GLU import gluLookAt, gluPerspective
-import trimesh
-import numpy as np
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+
 try:
     import fbx
 except ImportError:
@@ -77,12 +104,17 @@ class OpenGLWidget(QOpenGLWidget):
         self.angle_y = 0
         self.zoom = 1.0
         self.last_mouse_pos = QPoint()
+
         self.vertices = np.array([], dtype=np.float32)
         self.indices = np.array([], dtype=np.uint32)
         self.normals = np.array([], dtype=np.float32)
+        self.texcoords = np.array([], dtype=np.float32)
+        self.texture_id = 0
+        self.last_error = ""
+
         self.light_positions = [
             [1.0, 1.0, 1.0, 1.0],
-            [-1.0, 1.0, 1.0, 1.0]
+            [-1.0, 1.0, 1.0, 1.0],
         ]
         self.show_light_markers = False
 
@@ -92,6 +124,7 @@ class OpenGLWidget(QOpenGLWidget):
         glEnable(GL_LIGHTING)
         glEnable(GL_NORMALIZE)
         glEnable(GL_COLOR_MATERIAL)
+        glEnable(GL_TEXTURE_2D)
         glClearColor(0.0, 0.0, 0.0, 1.0)
         self.setup_lighting()
 
@@ -110,24 +143,56 @@ class OpenGLWidget(QOpenGLWidget):
         glMaterialfv(GL_FRONT, GL_SPECULAR, [1.0, 1.0, 1.0, 1.0])
         glMaterialf(GL_FRONT, GL_SHININESS, 50.0)
 
-    def load_mesh(self, file_path: str):
-        if file_path.lower().endswith('.fbx'):
-            self.load_fbx(file_path)
-        else:
-            self.load_obj(file_path)
-        self.update()
+    def load_mesh(self, file_path: str) -> bool:
+        try:
+            self._clear_texture()
+            self.texcoords = np.array([], dtype=np.float32)
+
+            if file_path.lower().endswith(".fbx"):
+                self.load_fbx(file_path)
+            else:
+                self.load_obj(file_path)
+
+            if self.vertices.size == 0 or self.indices.size == 0:
+                raise RuntimeError("Model does not contain valid geometry.")
+
+            self.last_error = ""
+            self.update()
+            return True
+        except Exception as exc:
+            self.vertices = np.array([], dtype=np.float32)
+            self.indices = np.array([], dtype=np.uint32)
+            self.normals = np.array([], dtype=np.float32)
+            self.texcoords = np.array([], dtype=np.float32)
+            self.last_error = str(exc)
+            self.update()
+            return False
 
     def load_obj(self, file_path: str):
         scene_or_mesh = trimesh.load(file_path)
 
         if isinstance(scene_or_mesh, trimesh.Scene):
-            combined_vertices, combined_indices, combined_normals = self.combine_meshes(scene_or_mesh)
+            if len(scene_or_mesh.geometry) == 1:
+                mesh = next(iter(scene_or_mesh.geometry.values()))
+                self._set_mesh_geometry(mesh)
+                self.texcoords = self._extract_uv(mesh)
+                self._load_texture_from_mesh_or_folder(mesh, file_path)
+            else:
+                combined_vertices, combined_indices, combined_normals = self.combine_meshes(scene_or_mesh)
+                self.vertices, self.indices, self.normals = self.process_mesh_data(
+                    combined_vertices, combined_indices, combined_normals
+                )
         else:
-            combined_vertices = scene_or_mesh.vertices
-            combined_indices = scene_or_mesh.faces
-            combined_normals = scene_or_mesh.vertex_normals
-        
-        self.vertices, self.indices, self.normals = self.process_mesh_data(combined_vertices, combined_indices, combined_normals)
+            self._set_mesh_geometry(scene_or_mesh)
+            self.texcoords = self._extract_uv(scene_or_mesh)
+            self._load_texture_from_mesh_or_folder(scene_or_mesh, file_path)
+
+    def _set_mesh_geometry(self, mesh):
+        self.vertices, self.indices, self.normals = self.process_mesh_data(
+            mesh.vertices,
+            mesh.faces,
+            mesh.vertex_normals,
+        )
 
     def combine_meshes(self, scene: trimesh.Scene):
         combined_vertices = []
@@ -144,25 +209,24 @@ class OpenGLWidget(QOpenGLWidget):
 
     def load_fbx(self, file_path: str):
         if fbx is None:
-            print("FBX SDK не установлен. Установите пакет 'fbx' для загрузки FBX.")
-            return
+            raise RuntimeError("FBX SDK is not installed.")
 
         manager = fbx.FbxManager.Create()
         importer = fbx.FbxImporter.Create(manager, "")
 
         if not importer.Initialize(file_path, -1, manager.GetIOSettings()):
-            print("Ошибка при инициализации импорта FBX файла")
-            return
+            raise RuntimeError("Failed to initialize FBX importer.")
 
         scene = fbx.FbxScene.Create(manager, "")
         if not importer.Import(scene):
-            print("Ошибка при импорте FBX файла")
-            return
+            raise RuntimeError("Failed to import FBX file.")
 
         importer.Destroy()
-
         combined_vertices, combined_indices, combined_normals = self.process_fbx_scene(scene)
-        self.vertices, self.indices, self.normals = self.process_mesh_data(combined_vertices, combined_indices, combined_normals)
+        manager.Destroy()
+        self.vertices, self.indices, self.normals = self.process_mesh_data(
+            combined_vertices, combined_indices, combined_normals
+        )
 
     def process_fbx_scene(self, scene):
         combined_vertices = []
@@ -174,44 +238,48 @@ class OpenGLWidget(QOpenGLWidget):
         node_count = scene.GetNodeCount()
         for i in range(node_count):
             node = scene.GetNode(i)
-            if node.GetNodeAttribute() is not None:
-                attr = node.GetNodeAttribute()
-                if mesh_attr_type is not None and attr.GetAttributeType() == mesh_attr_type:
-                    mesh = node.GetMesh()
-                    control_points = mesh.GetControlPoints()
-                    local_vertices = [[p[0], p[1], p[2]] for p in control_points]
-                    local_normals = [[0.0, 0.0, 0.0] for _ in local_vertices]
-                    local_indices = []
+            if node.GetNodeAttribute() is None:
+                continue
 
-                    for j in range(mesh.GetPolygonCount()):
-                        poly_size = mesh.GetPolygonSize(j)
-                        polygon = [mesh.GetPolygonVertex(j, k) for k in range(poly_size)]
-                        if poly_size < 3:
-                            continue
+            attr = node.GetNodeAttribute()
+            if mesh_attr_type is None or attr.GetAttributeType() != mesh_attr_type:
+                continue
 
-                        for k in range(1, poly_size - 1):
-                            tri = (polygon[0], polygon[k], polygon[k + 1])
-                            local_indices.extend(tri)
+            mesh = node.GetMesh()
+            control_points = mesh.GetControlPoints()
+            local_vertices = [[p[0], p[1], p[2]] for p in control_points]
+            local_normals = [[0.0, 0.0, 0.0] for _ in local_vertices]
+            local_indices = []
 
-                            v0 = np.array(local_vertices[tri[0]], dtype=np.float32)
-                            v1 = np.array(local_vertices[tri[1]], dtype=np.float32)
-                            v2 = np.array(local_vertices[tri[2]], dtype=np.float32)
-                            normal = np.cross(v1 - v0, v2 - v0)
+            for j in range(mesh.GetPolygonCount()):
+                poly_size = mesh.GetPolygonSize(j)
+                polygon = [mesh.GetPolygonVertex(j, k) for k in range(poly_size)]
+                if poly_size < 3:
+                    continue
 
-                            for idx in tri:
-                                local_normals[idx][0] += float(normal[0])
-                                local_normals[idx][1] += float(normal[1])
-                                local_normals[idx][2] += float(normal[2])
+                for k in range(1, poly_size - 1):
+                    tri = (polygon[0], polygon[k], polygon[k + 1])
+                    local_indices.extend(tri)
 
-                    local_normals_np = np.array(local_normals, dtype=np.float32)
-                    lengths = np.linalg.norm(local_normals_np, axis=1)
-                    valid = lengths > 0
-                    local_normals_np[valid] /= lengths[valid][:, None]
+                    v0 = np.array(local_vertices[tri[0]], dtype=np.float32)
+                    v1 = np.array(local_vertices[tri[1]], dtype=np.float32)
+                    v2 = np.array(local_vertices[tri[2]], dtype=np.float32)
+                    normal = np.cross(v1 - v0, v2 - v0)
 
-                    combined_vertices.extend(local_vertices)
-                    combined_normals.extend(local_normals_np.tolist())
-                    combined_indices.extend((np.array(local_indices, dtype=np.uint32) + vertex_offset).tolist())
-                    vertex_offset += len(local_vertices)
+                    for idx in tri:
+                        local_normals[idx][0] += float(normal[0])
+                        local_normals[idx][1] += float(normal[1])
+                        local_normals[idx][2] += float(normal[2])
+
+            local_normals_np = np.array(local_normals, dtype=np.float32)
+            lengths = np.linalg.norm(local_normals_np, axis=1)
+            valid = lengths > 0
+            local_normals_np[valid] /= lengths[valid][:, None]
+
+            combined_vertices.extend(local_vertices)
+            combined_normals.extend(local_normals_np.tolist())
+            combined_indices.extend((np.array(local_indices, dtype=np.uint32) + vertex_offset).tolist())
+            vertex_offset += len(local_vertices)
 
         return combined_vertices, combined_indices, combined_normals
 
@@ -226,6 +294,9 @@ class OpenGLWidget(QOpenGLWidget):
                 np.array([], dtype=np.uint32),
                 np.array([], dtype=np.float32),
             )
+
+        if indices.size % 3 != 0:
+            raise RuntimeError("Invalid index buffer: expected triangles.")
 
         if normals.size == 0 or normals.shape[0] != vertices.shape[0]:
             normals = np.zeros_like(vertices, dtype=np.float32)
@@ -266,7 +337,6 @@ class OpenGLWidget(QOpenGLWidget):
         glLoadIdentity()
         gluLookAt(0, 0, 3 / self.zoom, 0, 0, 0, 0, 1, 0)
 
-        # Light positions are transformed by current modelview matrix at call time.
         glLightfv(GL_LIGHT0, GL_POSITION, self.light_positions[0])
         glLightfv(GL_LIGHT1, GL_POSITION, self.light_positions[1])
 
@@ -279,7 +349,25 @@ class OpenGLWidget(QOpenGLWidget):
             glEnableClientState(GL_NORMAL_ARRAY)
             glVertexPointer(3, GL_FLOAT, 0, self.vertices)
             glNormalPointer(GL_FLOAT, 0, self.normals)
+
+            has_texture = (
+                self.texture_id != 0
+                and self.texcoords.size > 0
+                and self.texcoords.shape[0] == self.vertices.shape[0]
+            )
+            if has_texture:
+                glEnable(GL_TEXTURE_2D)
+                glBindTexture(GL_TEXTURE_2D, self.texture_id)
+                glEnableClientState(GL_TEXTURE_COORD_ARRAY)
+                glTexCoordPointer(2, GL_FLOAT, 0, self.texcoords)
+
             glDrawElements(GL_TRIANGLES, int(self.indices.size), GL_UNSIGNED_INT, self.indices)
+
+            if has_texture:
+                glDisableClientState(GL_TEXTURE_COORD_ARRAY)
+                glBindTexture(GL_TEXTURE_2D, 0)
+                glDisable(GL_TEXTURE_2D)
+
             glDisableClientState(GL_VERTEX_ARRAY)
             glDisableClientState(GL_NORMAL_ARRAY)
             glDisable(GL_LIGHTING)
@@ -295,17 +383,11 @@ class OpenGLWidget(QOpenGLWidget):
         glTranslatef(position[0], position[1], position[2])
         size = 0.05
         glBegin(GL_QUADS)
-        # Front face
         self.draw_cube_face(-size, size, size)
-        # Back face
         self.draw_cube_face(-size, size, -size)
-        # Top face
         self.draw_cube_face(size, size, -size, is_top=True)
-        # Bottom face
         self.draw_cube_face(size, -size, -size, is_bottom=True)
-        # Right face
         self.draw_cube_face(size, size, size, is_right=True)
-        # Left face
         self.draw_cube_face(-size, size, size, is_left=True)
         glEnd()
         glPopMatrix()
@@ -359,3 +441,126 @@ class OpenGLWidget(QOpenGLWidget):
         self.angle_x = angle_x
         self.angle_y = angle_y
         self.update()
+
+    def _extract_uv(self, mesh):
+        uv = getattr(mesh.visual, "uv", None)
+        if uv is None:
+            return np.array([], dtype=np.float32)
+        uv_arr = np.array(uv, dtype=np.float32)
+        if uv_arr.ndim != 2 or uv_arr.shape[1] < 2:
+            return np.array([], dtype=np.float32)
+        return uv_arr[:, :2]
+
+    def _load_texture_from_mesh_or_folder(self, mesh, file_path: str):
+        material = getattr(mesh.visual, "material", None)
+        image = getattr(material, "image", None) if material is not None else None
+        if image is not None:
+            self._upload_texture_image(image)
+            return
+
+        if Image is None:
+            return
+
+        candidates = self._find_texture_candidates(file_path)
+        for candidate in candidates:
+            try:
+                img = Image.open(candidate)
+                self._upload_texture_image(img)
+                return
+            except Exception:
+                continue
+
+    def _find_texture_candidates(self, model_path: str):
+        model_dir = os.path.dirname(model_path)
+        model_name = os.path.splitext(os.path.basename(model_path))[0].lower()
+        texture_exts = (".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff")
+        search_dirs = [model_dir, os.path.join(model_dir, "Textures")]
+        candidates = []
+
+        for directory in search_dirs:
+            if not os.path.isdir(directory):
+                continue
+            for name in os.listdir(directory):
+                lower = name.lower()
+                if not lower.endswith(texture_exts):
+                    continue
+                full_path = os.path.join(directory, name)
+                if model_name in lower:
+                    candidates.insert(0, full_path)
+                else:
+                    candidates.append(full_path)
+        return candidates
+
+    def _upload_texture_image(self, image):
+        if image is None:
+            return
+
+        if isinstance(image, np.ndarray):
+            arr = image
+        elif Image is not None and isinstance(image, Image.Image):
+            arr = np.array(image, dtype=np.uint8)
+        else:
+            arr = np.array(image)
+
+        if arr.ndim != 3:
+            return
+
+        arr = np.flipud(arr)
+        if arr.dtype != np.uint8:
+            arr = arr.astype(np.uint8)
+
+        channels = arr.shape[2]
+        if channels == 3:
+            image_format = GL_RGB
+        elif channels == 4:
+            image_format = GL_RGBA
+        else:
+            return
+
+        self.makeCurrent()
+        try:
+            self._clear_texture(already_current=True)
+            texture_id = glGenTextures(1)
+            if isinstance(texture_id, (tuple, list)):
+                texture_id = int(texture_id[0])
+            self.texture_id = int(texture_id)
+
+            glBindTexture(GL_TEXTURE_2D, self.texture_id)
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
+            glTexImage2D(
+                GL_TEXTURE_2D,
+                0,
+                image_format,
+                int(arr.shape[1]),
+                int(arr.shape[0]),
+                0,
+                image_format,
+                GL_UNSIGNED_BYTE,
+                arr,
+            )
+            glBindTexture(GL_TEXTURE_2D, 0)
+        finally:
+            self.doneCurrent()
+
+    def _clear_texture(self, already_current=False):
+        if not self.texture_id:
+            return
+        if self.context() is None:
+            self.texture_id = 0
+            return
+
+        if already_current:
+            glDeleteTextures([int(self.texture_id)])
+            self.texture_id = 0
+            return
+
+        self.makeCurrent()
+        try:
+            glDeleteTextures([int(self.texture_id)])
+            self.texture_id = 0
+        finally:
+            self.doneCurrent()
