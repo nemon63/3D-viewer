@@ -330,8 +330,12 @@ class OpenGLWidget(QOpenGLWidget):
         self.texture_ids = {ch: 0 for ch in ALL_CHANNELS}
         self.last_texture_path = ""
         self.last_texture_paths = {ch: "" for ch in ALL_CHANNELS}
+        self.channel_overrides = {ch: None for ch in ALL_CHANNELS}
+        self.texture_cache = {}
+        self.texture_alpha_cache = {}
         self.base_texture_has_alpha = False
         self.last_texture_sets = {}
+        self.submeshes = []
         self.last_debug_info = {}
         self.last_error = ""
 
@@ -438,12 +442,18 @@ class OpenGLWidget(QOpenGLWidget):
             self.normals = payload.normals
             self.texcoords = payload.texcoords
             self.last_texture_sets = payload.texture_sets or {}
+            self.submeshes = payload.submeshes or []
             self.last_debug_info = payload.debug_info or {}
             self.last_texture_path = ""
+            self.channel_overrides = {ch: None for ch in ALL_CHANNELS}
             self._compute_model_bounds()
 
-            if self.texcoords.size > 0:
+            if self.texcoords.size > 0 and not self.submeshes:
                 self._apply_default_texture_set()
+            elif self.submeshes:
+                first_base = (self.submeshes[0].get("texture_paths") or {}).get(CHANNEL_BASE, "")
+                self.last_texture_path = first_base or ""
+                self.base_texture_has_alpha = bool(self.texture_alpha_cache.get(first_base, False))
 
             if self.vertices.size == 0 or self.indices.size == 0:
                 raise RuntimeError("Model does not contain valid geometry.")
@@ -458,6 +468,7 @@ class OpenGLWidget(QOpenGLWidget):
             self.texcoords = np.array([], dtype=np.float32)
             self.last_texture_path = ""
             self.last_texture_sets = {}
+            self.submeshes = []
             self.last_debug_info = {}
             self.model_center = np.array([0.0, 0.0, 0.0], dtype=np.float32)
             self.model_translate = np.array([0.0, 0.0, 0.0], dtype=np.float32)
@@ -519,29 +530,27 @@ class OpenGLWidget(QOpenGLWidget):
         self._apply_model_translation()
         glUseProgram(self.shader_program)
         try:
-            self._set_shader_uniforms()
-            self._draw_mesh()
+            self._set_common_uniforms()
+            if self.submeshes:
+                for submesh in self.submeshes:
+                    tex_ids, has_alpha = self._resolve_submesh_textures(submesh)
+                    self._set_material_uniforms(tex_ids, has_alpha)
+                    self._draw_mesh_indices(submesh["indices"])
+            else:
+                self._set_material_uniforms(self.texture_ids, self.base_texture_has_alpha)
+                self._draw_mesh_indices(self.indices)
         finally:
+            self._unbind_texture_units()
             glUseProgram(0)
             glPopMatrix()
 
-    def _set_shader_uniforms(self):
+    def _set_common_uniforms(self):
         self._set_sampler_uniform("uBaseColorTex", 0)
         self._set_sampler_uniform("uMetalTex", 1)
         self._set_sampler_uniform("uRoughTex", 2)
         self._set_sampler_uniform("uNormalTex", 3)
-
-        self._bind_texture_unit(0, self.texture_ids[CHANNEL_BASE])
-        self._bind_texture_unit(1, self.texture_ids[CHANNEL_METAL])
-        self._bind_texture_unit(2, self.texture_ids[CHANNEL_ROUGH])
-        self._bind_texture_unit(3, self.texture_ids[CHANNEL_NORMAL])
-
-        self._set_int_uniform("uHasBase", 1 if self.texture_ids[CHANNEL_BASE] else 0)
-        self._set_int_uniform("uHasMetal", 1 if self.texture_ids[CHANNEL_METAL] else 0)
-        self._set_int_uniform("uHasRough", 1 if self.texture_ids[CHANNEL_ROUGH] else 0)
-        self._set_int_uniform("uHasNormal", 1 if self.texture_ids[CHANNEL_NORMAL] else 0)
+        self._set_sampler_uniform("uShadowMap", 4)
         self._set_int_uniform("uUnlitTexturePreview", 1 if self.unlit_texture_preview else 0)
-        self._set_int_uniform("uUseAlphaCutout", 1 if self.base_texture_has_alpha else 0)
         self._set_float_uniform("uAlphaCutoff", self.alpha_cutoff)
         self._set_float_uniform("uAmbientStrength", self.ambient_strength)
 
@@ -553,7 +562,6 @@ class OpenGLWidget(QOpenGLWidget):
         self._set_vec3_uniform("uLightColor1", *fill_color)
         self._set_matrix_uniform("uLightVP", self._light_vp)
         self._set_vec3_uniform("uModelOffset", *self.model_translate)
-        self._set_sampler_uniform("uShadowMap", 4)
         texel = 1.0 / float(max(self.shadow_size, 1))
         self._set_int_uniform("uShadowEnabled", 1 if (self.enable_ground_shadow and self.shadow_depth_tex) else 0)
         location = glGetUniformLocation(self.shader_program, "uShadowTexelSize")
@@ -561,7 +569,27 @@ class OpenGLWidget(QOpenGLWidget):
             glUniform2f(location, texel, texel)
         self._bind_texture_unit(4, self.shadow_depth_tex)
 
-    def _draw_mesh(self):
+    def _set_material_uniforms(self, texture_ids, has_base_alpha: bool):
+        base_tex = int(texture_ids.get(CHANNEL_BASE, 0) or 0)
+        metal_tex = int(texture_ids.get(CHANNEL_METAL, 0) or 0)
+        rough_tex = int(texture_ids.get(CHANNEL_ROUGH, 0) or 0)
+        normal_tex = int(texture_ids.get(CHANNEL_NORMAL, 0) or 0)
+
+        self._bind_texture_unit(0, base_tex)
+        self._bind_texture_unit(1, metal_tex)
+        self._bind_texture_unit(2, rough_tex)
+        self._bind_texture_unit(3, normal_tex)
+
+        self._set_int_uniform("uHasBase", 1 if base_tex else 0)
+        self._set_int_uniform("uHasMetal", 1 if metal_tex else 0)
+        self._set_int_uniform("uHasRough", 1 if rough_tex else 0)
+        self._set_int_uniform("uHasNormal", 1 if normal_tex else 0)
+        self._set_int_uniform("uUseAlphaCutout", 1 if has_base_alpha else 0)
+
+    def _draw_mesh_indices(self, draw_indices):
+        draw_indices = np.asarray(draw_indices, dtype=np.uint32).reshape(-1)
+        if draw_indices.size == 0:
+            return
         glEnableClientState(GL_VERTEX_ARRAY)
         glVertexPointer(3, GL_FLOAT, 0, self.vertices)
 
@@ -573,14 +601,14 @@ class OpenGLWidget(QOpenGLWidget):
             glEnableClientState(GL_TEXTURE_COORD_ARRAY)
             glTexCoordPointer(2, GL_FLOAT, 0, self.texcoords)
 
-        glDrawElements(GL_TRIANGLES, int(self.indices.size), GL_UNSIGNED_INT, self.indices)
+        glDrawElements(GL_TRIANGLES, int(draw_indices.size), GL_UNSIGNED_INT, draw_indices)
 
         if has_uv:
             glDisableClientState(GL_TEXTURE_COORD_ARRAY)
         glDisableClientState(GL_NORMAL_ARRAY)
         glDisableClientState(GL_VERTEX_ARRAY)
 
-        # Unbind texture units
+    def _unbind_texture_units(self):
         for unit in (GL_TEXTURE0, GL_TEXTURE1, GL_TEXTURE2, GL_TEXTURE3, GL_TEXTURE4):
             glActiveTexture(unit)
             glBindTexture(GL_TEXTURE_2D, 0)
@@ -704,6 +732,36 @@ class OpenGLWidget(QOpenGLWidget):
         active = [GL_TEXTURE0, GL_TEXTURE1, GL_TEXTURE2, GL_TEXTURE3, GL_TEXTURE4][slot]
         glActiveTexture(active)
         glBindTexture(GL_TEXTURE_2D, int(texture_id) if texture_id else 0)
+
+    def _resolve_submesh_textures(self, submesh):
+        texture_paths = submesh.get("texture_paths") or {}
+        resolved = {}
+        for ch in ALL_CHANNELS:
+            override = self.channel_overrides.get(ch)
+            resolved[ch] = override if override is not None else (texture_paths.get(ch) or "")
+
+        texture_ids = {ch: self._get_or_create_texture_id(resolved[ch]) for ch in ALL_CHANNELS}
+        base_path = resolved.get(CHANNEL_BASE, "")
+        has_alpha = bool(self.texture_alpha_cache.get(base_path, False))
+        return texture_ids, has_alpha
+
+    def _get_or_create_texture_id(self, path: str):
+        if not path:
+            return 0
+        if path in self.texture_cache:
+            return int(self.texture_cache[path])
+        if Image is None or not os.path.isfile(path):
+            return 0
+        try:
+            with Image.open(path) as img:
+                image_copy = img.copy()
+                has_alpha = image_copy.mode in ("RGBA", "LA") or ("transparency" in image_copy.info)
+                texture_id = self._upload_texture_image(image_copy, old_texture_id=0, manage_context=False)
+            self.texture_cache[path] = int(texture_id)
+            self.texture_alpha_cache[path] = bool(has_alpha)
+            return int(texture_id)
+        except Exception:
+            return 0
 
     def _draw_mesh_positions_only(self):
         glEnableClientState(GL_VERTEX_ARRAY)
@@ -913,6 +971,7 @@ class OpenGLWidget(QOpenGLWidget):
         if Image is None:
             return False
         if not path:
+            self.channel_overrides[channel] = ""
             self._clear_channel_texture(channel)
             self.update()
             return True
@@ -926,6 +985,7 @@ class OpenGLWidget(QOpenGLWidget):
                 texture_id = self._upload_texture_image(image_copy, old_texture_id=self.texture_ids[channel])
             self.texture_ids[channel] = texture_id
             self.last_texture_paths[channel] = path
+            self.channel_overrides[channel] = path
             if channel == CHANNEL_BASE:
                 self.last_texture_path = path
                 self.base_texture_has_alpha = has_alpha
@@ -944,7 +1004,7 @@ class OpenGLWidget(QOpenGLWidget):
                 self.last_texture_path = ""
                 self.base_texture_has_alpha = False
 
-    def _upload_texture_image(self, image, old_texture_id=0):
+    def _upload_texture_image(self, image, old_texture_id=0, manage_context=True):
         if image is None:
             raise RuntimeError("Texture image is empty.")
 
@@ -972,7 +1032,8 @@ class OpenGLWidget(QOpenGLWidget):
         else:
             raise RuntimeError("Texture must have 3 or 4 channels.")
 
-        self.makeCurrent()
+        if manage_context:
+            self.makeCurrent()
         try:
             if old_texture_id:
                 glDeleteTextures([int(old_texture_id)])
@@ -1002,7 +1063,8 @@ class OpenGLWidget(QOpenGLWidget):
             glBindTexture(GL_TEXTURE_2D, 0)
             return texture_id
         finally:
-            self.doneCurrent()
+            if manage_context:
+                self.doneCurrent()
 
     def _delete_texture_id(self, tex_id: int):
         if not tex_id:
@@ -1018,6 +1080,16 @@ class OpenGLWidget(QOpenGLWidget):
     def _clear_all_textures(self):
         for ch in ALL_CHANNELS:
             self._clear_channel_texture(ch)
+        if self.context() is not None:
+            self.makeCurrent()
+            try:
+                for tex_id in self.texture_cache.values():
+                    if tex_id:
+                        glDeleteTextures([int(tex_id)])
+            finally:
+                self.doneCurrent()
+        self.texture_cache = {}
+        self.texture_alpha_cache = {}
         self.last_texture_paths = {ch: "" for ch in ALL_CHANNELS}
         self.last_texture_path = ""
 
