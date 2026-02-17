@@ -1,5 +1,5 @@
 import os
-from PyQt5.QtCore import QSettings, Qt
+from PyQt5.QtCore import QObject, QSettings, Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -21,6 +21,24 @@ from PyQt5.QtWidgets import (
 )
 
 from viewer.ui.opengl_widget import OpenGLWidget
+from viewer.loaders.model_loader import load_model_payload
+
+
+class ModelLoadWorker(QObject):
+    loaded = pyqtSignal(int, object)
+    failed = pyqtSignal(int, str)
+
+    def __init__(self, request_id: int, file_path: str):
+        super().__init__()
+        self.request_id = request_id
+        self.file_path = file_path
+
+    def run(self):
+        try:
+            payload = load_model_payload(self.file_path)
+            self.loaded.emit(self.request_id, payload)
+        except Exception as exc:
+            self.failed.emit(self.request_id, str(exc))
 
 
 class MainWindow(QMainWindow):
@@ -41,6 +59,10 @@ class MainWindow(QMainWindow):
             ("normal", "Normal"),
         ]
         self.material_boxes = {}
+        self._load_thread = None
+        self._load_worker = None
+        self._load_request_id = 0
+        self._active_load_row = -1
         self.init_ui()
         self._register_shortcuts()
         self._restore_last_directory()
@@ -74,12 +96,12 @@ class MainWindow(QMainWindow):
         panel_layout.addWidget(self.model_list, stretch=1)
 
         nav_layout = QHBoxLayout()
-        prev_button = QPushButton("Предыдущая", self)
-        prev_button.clicked.connect(self.show_previous_model)
-        nav_layout.addWidget(prev_button)
-        next_button = QPushButton("Следующая", self)
-        next_button.clicked.connect(self.show_next_model)
-        nav_layout.addWidget(next_button)
+        self.prev_button = QPushButton("Предыдущая", self)
+        self.prev_button.clicked.connect(self.show_previous_model)
+        nav_layout.addWidget(self.prev_button)
+        self.next_button = QPushButton("Следующая", self)
+        self.next_button.clicked.connect(self.show_next_model)
+        nav_layout.addWidget(self.next_button)
         panel_layout.addLayout(nav_layout)
 
         self.status_label = QLabel("Выбери папку с моделями")
@@ -266,17 +288,7 @@ class MainWindow(QMainWindow):
         file_path = self.model_files[row]
         if not self._confirm_heavy_model_load(file_path):
             return
-        loaded = self.gl_widget.load_mesh(file_path)
-        if loaded:
-            self.current_file_path = file_path
-            self._populate_material_controls(self.gl_widget.last_texture_sets)
-            self._update_status(row)
-            self.setWindowTitle(f"3D Viewer - {os.path.basename(file_path)}")
-            if file_path.lower().endswith(".fbx"):
-                print("[FBX DEBUG]", self.gl_widget.last_debug_info or {})
-                print("[FBX DEBUG] selected_texture:", self.gl_widget.last_texture_path or "<none>")
-        else:
-            self.status_label.setText(f"Ошибка: {self.gl_widget.last_error}")
+        self._start_async_model_load(row, file_path)
 
     def on_selection_changed(self):
         row = self.model_list.currentRow()
@@ -476,6 +488,62 @@ class MainWindow(QMainWindow):
             self.projection_combo.blockSignals(True)
             self.projection_combo.setCurrentIndex(index)
             self.projection_combo.blockSignals(False)
+
+    def _start_async_model_load(self, row: int, file_path: str):
+        self._load_request_id += 1
+        request_id = self._load_request_id
+        self._active_load_row = row
+
+        # Keep previous worker alive; ignore outdated results by request_id.
+        self.model_list.setEnabled(False)
+        self.prev_button.setEnabled(False)
+        self.next_button.setEnabled(False)
+        self.status_label.setText(f"Загрузка: {os.path.basename(file_path)} ...")
+
+        thread = QThread(self)
+        worker = ModelLoadWorker(request_id, file_path)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.loaded.connect(self._on_model_loaded)
+        worker.failed.connect(self._on_model_load_failed)
+        worker.loaded.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        self._load_thread = thread
+        self._load_worker = worker
+        thread.start()
+
+    def _on_model_loaded(self, request_id: int, payload):
+        if request_id != self._load_request_id:
+            return
+        row = self._active_load_row
+        file_path = self.model_files[row] if 0 <= row < len(self.model_files) else ""
+        loaded = self.gl_widget.apply_payload(payload)
+        self.model_list.setEnabled(True)
+        self.prev_button.setEnabled(True)
+        self.next_button.setEnabled(True)
+
+        if not loaded:
+            self.status_label.setText(f"Ошибка: {self.gl_widget.last_error}")
+            return
+
+        self.current_file_path = file_path
+        self._populate_material_controls(self.gl_widget.last_texture_sets)
+        self._update_status(row)
+        self.setWindowTitle(f"3D Viewer - {os.path.basename(file_path)}")
+        if file_path.lower().endswith(".fbx"):
+            print("[FBX DEBUG]", self.gl_widget.last_debug_info or {})
+            print("[FBX DEBUG] selected_texture:", self.gl_widget.last_texture_path or "<none>")
+
+    def _on_model_load_failed(self, request_id: int, error_text: str):
+        if request_id != self._load_request_id:
+            return
+        self.model_list.setEnabled(True)
+        self.prev_button.setEnabled(True)
+        self.next_button.setEnabled(True)
+        self.status_label.setText(f"Ошибка загрузки: {error_text}")
 
     def _confirm_heavy_model_load(self, file_path: str) -> bool:
         try:

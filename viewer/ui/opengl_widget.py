@@ -365,6 +365,10 @@ class OpenGLWidget(QOpenGLWidget):
         self._inertia_timer = QTimer(self)
         self._inertia_timer.setInterval(16)
         self._inertia_timer.timeout.connect(self._on_inertia_tick)
+        self._warmup_queue = []
+        self._warmup_timer = QTimer(self)
+        self._warmup_timer.setSingleShot(True)
+        self._warmup_timer.timeout.connect(self._warmup_next_texture)
 
     def initializeGL(self):
         glEnable(GL_DEPTH_TEST)
@@ -437,6 +441,25 @@ class OpenGLWidget(QOpenGLWidget):
         try:
             self._clear_all_textures()
             payload = load_model_payload(file_path)
+            return self.apply_payload(payload)
+        except Exception as exc:
+            self.vertices = np.array([], dtype=np.float32)
+            self.indices = np.array([], dtype=np.uint32)
+            self.normals = np.array([], dtype=np.float32)
+            self.texcoords = np.array([], dtype=np.float32)
+            self.last_texture_path = ""
+            self.last_texture_sets = {}
+            self.submeshes = []
+            self.last_debug_info = {}
+            self.model_center = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+            self.model_translate = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+            self.model_target_y = 0.0
+            self.last_error = str(exc)
+            self.update()
+            return False
+
+    def apply_payload(self, payload) -> bool:
+        try:
             self.vertices = payload.vertices
             self.indices = payload.indices
             self.normals = payload.normals
@@ -461,6 +484,7 @@ class OpenGLWidget(QOpenGLWidget):
                 raise RuntimeError("Model does not contain valid geometry.")
 
             self.last_error = ""
+            self._start_texture_warmup()
             self.update()
             return True
         except Exception as exc:
@@ -778,6 +802,37 @@ class OpenGLWidget(QOpenGLWidget):
         except Exception:
             return 0
 
+    def _start_texture_warmup(self):
+        # Perceived performance: show model with base map first, then warm non-base maps incrementally.
+        pending = []
+        seen = set()
+        for sub in self.submeshes:
+            paths = sub.get("texture_paths") or {}
+            for ch in (CHANNEL_METAL, CHANNEL_ROUGH, CHANNEL_NORMAL):
+                p = paths.get(ch) or self.last_texture_paths.get(ch) or ""
+                if not p:
+                    candidates = self.last_texture_sets.get(ch) or []
+                    p = candidates[0] if candidates else ""
+                if not p:
+                    continue
+                key = os.path.normcase(os.path.normpath(p))
+                if key in seen:
+                    continue
+                seen.add(key)
+                pending.append(p)
+
+        self._warmup_queue = pending
+        if self._warmup_queue:
+            self._warmup_timer.start(0)
+
+    def _warmup_next_texture(self):
+        if not self._warmup_queue:
+            return
+        path = self._warmup_queue.pop(0)
+        self._get_or_create_texture_id(path)
+        if self._warmup_queue:
+            self._warmup_timer.start(0)
+
     def _draw_mesh_positions_only(self):
         glEnableClientState(GL_VERTEX_ARRAY)
         glVertexPointer(3, GL_FLOAT, 0, self.vertices)
@@ -1093,6 +1148,8 @@ class OpenGLWidget(QOpenGLWidget):
             self.doneCurrent()
 
     def _clear_all_textures(self):
+        self._warmup_timer.stop()
+        self._warmup_queue = []
         for ch in ALL_CHANNELS:
             self._clear_channel_texture(ch)
         if self.context() is not None:

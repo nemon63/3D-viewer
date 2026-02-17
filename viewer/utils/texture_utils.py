@@ -2,6 +2,7 @@ import os
 
 
 TEXTURE_EXTS = (".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff")
+_DIR_SCAN_CACHE = {}
 
 CHANNEL_BASECOLOR = "basecolor"
 CHANNEL_METAL = "metal"
@@ -88,9 +89,17 @@ def group_texture_candidates(candidates):
 def find_texture_candidates(model_path):
     model_dir = os.path.dirname(model_path)
     model_name = os.path.splitext(os.path.basename(model_path))[0].lower()
+    candidates = _get_cached_texture_files(model_dir)
+    return rank_texture_candidates(candidates, model_name=model_name)
+
+
+def _get_cached_texture_files(model_dir):
+    norm_model_dir = os.path.normcase(os.path.normpath(model_dir))
+    if norm_model_dir in _DIR_SCAN_CACHE:
+        return list(_DIR_SCAN_CACHE[norm_model_dir])
+
     search_dirs = [model_dir, os.path.join(model_dir, "Textures")]
     candidates = []
-
     for directory in search_dirs:
         if not os.path.isdir(directory):
             continue
@@ -100,7 +109,8 @@ def find_texture_candidates(model_path):
                 if lower.endswith(TEXTURE_EXTS):
                     candidates.append(os.path.join(root, name))
 
-    return rank_texture_candidates(candidates, model_name=model_name)
+    _DIR_SCAN_CACHE[norm_model_dir] = list(candidates)
+    return candidates
 
 
 def resolve_texture_path(model_dir, abs_path, rel_path):
