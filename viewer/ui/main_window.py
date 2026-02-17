@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QMainWindow,
     QPushButton,
     QShortcut,
@@ -23,6 +24,8 @@ from viewer.ui.opengl_widget import OpenGLWidget
 
 
 class MainWindow(QMainWindow):
+    HEAVY_FILE_SIZE_MB = 200
+
     def __init__(self):
         super().__init__()
         self.gl_widget = OpenGLWidget(self)
@@ -205,7 +208,8 @@ class MainWindow(QMainWindow):
     def _restore_last_directory(self):
         last_directory = self.settings.value("last_directory", "", type=str)
         if last_directory and os.path.isdir(last_directory):
-            self.set_directory(last_directory)
+            # Safe startup: don't auto-load the first model from previous session.
+            self.set_directory(last_directory, auto_select_first=False)
 
     def choose_directory(self):
         directory = QFileDialog.getExistingDirectory(self, "Выбери папку с моделями", self.current_directory or os.getcwd())
@@ -216,7 +220,7 @@ class MainWindow(QMainWindow):
         if self.current_directory:
             self.set_directory(self.current_directory)
 
-    def set_directory(self, directory):
+    def set_directory(self, directory, auto_select_first=True):
         self.current_directory = directory
         self.settings.setValue("last_directory", directory)
         self.directory_label.setText(directory)
@@ -227,7 +231,15 @@ class MainWindow(QMainWindow):
             self.status_label.setText("В выбранной папке нет поддерживаемых моделей.")
             return
 
-        self.model_list.setCurrentRow(0)
+        if auto_select_first:
+            self.model_list.setCurrentRow(0)
+        else:
+            self.model_list.clearSelection()
+            self.status_label.setText(
+                f"Найдено моделей: {len(self.model_files)}. Автозагрузка отключена, выбери модель вручную."
+            )
+            return
+
         self.status_label.setText(f"Найдено моделей: {len(self.model_files)}")
 
     def _scan_models(self, directory):
@@ -252,6 +264,8 @@ class MainWindow(QMainWindow):
         if row < 0 or row >= len(self.model_files):
             return
         file_path = self.model_files[row]
+        if not self._confirm_heavy_model_load(file_path):
+            return
         loaded = self.gl_widget.load_mesh(file_path)
         if loaded:
             self.current_file_path = file_path
@@ -462,3 +476,26 @@ class MainWindow(QMainWindow):
             self.projection_combo.blockSignals(True)
             self.projection_combo.setCurrentIndex(index)
             self.projection_combo.blockSignals(False)
+
+    def _confirm_heavy_model_load(self, file_path: str) -> bool:
+        try:
+            size_bytes = os.path.getsize(file_path)
+        except OSError:
+            return True
+
+        size_mb = size_bytes / (1024 * 1024)
+        if size_mb < self.HEAVY_FILE_SIZE_MB:
+            return True
+
+        answer = QMessageBox.question(
+            self,
+            "Тяжёлая модель",
+            (
+                f"Файл очень большой: {size_mb:.1f} MB\n"
+                "Загрузка может зависнуть на слабом CPU/GPU.\n\n"
+                "Продолжить загрузку?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes

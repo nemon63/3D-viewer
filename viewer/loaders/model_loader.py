@@ -7,6 +7,9 @@ import trimesh
 from viewer.utils.geometry_utils import process_mesh_data
 from viewer.utils.texture_utils import (
     CHANNEL_BASECOLOR,
+    CHANNEL_METAL,
+    CHANNEL_NORMAL,
+    CHANNEL_ROUGHNESS,
     find_texture_candidates,
     group_texture_candidates,
     rank_texture_candidates,
@@ -168,6 +171,22 @@ def _select_texture_paths(texture_sets: dict):
     }
 
 
+def _merge_texture_paths(primary_paths: dict, fallback_sets: dict):
+    merged = dict(primary_paths or {})
+    channel_map = (
+        ("basecolor", CHANNEL_BASECOLOR),
+        ("metal", CHANNEL_METAL),
+        ("roughness", CHANNEL_ROUGHNESS),
+        ("normal", CHANNEL_NORMAL),
+    )
+    for out_channel, fallback_channel in channel_map:
+        if merged.get(out_channel):
+            continue
+        candidates = fallback_sets.get(fallback_channel) or []
+        merged[out_channel] = candidates[0] if candidates else ""
+    return merged
+
+
 def _load_fbx_payload(file_path: str) -> MeshPayload:
     if fbx is None:
         raise RuntimeError("FBX SDK is not installed.")
@@ -234,7 +253,10 @@ def _load_fbx_payload(file_path: str) -> MeshPayload:
         if not texture_sets.get(CHANNEL_BASECOLOR):
             texture_sets[CHANNEL_BASECOLOR] = texture_candidates[:1]
 
-        if not submeshes:
+        if submeshes:
+            for submesh in submeshes:
+                submesh["texture_paths"] = _merge_texture_paths(submesh.get("texture_paths") or {}, texture_sets)
+        else:
             submeshes = [
                 {
                     "indices": np.array(indices, dtype=np.uint32),

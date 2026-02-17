@@ -452,6 +452,8 @@ class OpenGLWidget(QOpenGLWidget):
                 self._apply_default_texture_set()
             elif self.submeshes:
                 first_base = (self.submeshes[0].get("texture_paths") or {}).get(CHANNEL_BASE, "")
+                if not first_base:
+                    first_base = self._get_fallback_texture_path(CHANNEL_BASE)
                 self.last_texture_path = first_base or ""
                 self.base_texture_has_alpha = bool(self.texture_alpha_cache.get(first_base, False))
 
@@ -738,12 +740,25 @@ class OpenGLWidget(QOpenGLWidget):
         resolved = {}
         for ch in ALL_CHANNELS:
             override = self.channel_overrides.get(ch)
-            resolved[ch] = override if override is not None else (texture_paths.get(ch) or "")
+            if override is not None:
+                resolved[ch] = override
+                continue
+            path = texture_paths.get(ch) or self.last_texture_paths.get(ch) or self._get_fallback_texture_path(ch)
+            resolved[ch] = path or ""
 
         texture_ids = {ch: self._get_or_create_texture_id(resolved[ch]) for ch in ALL_CHANNELS}
         base_path = resolved.get(CHANNEL_BASE, "")
         has_alpha = bool(self.texture_alpha_cache.get(base_path, False))
         return texture_ids, has_alpha
+
+    def _get_fallback_texture_path(self, channel: str):
+        direct = self.last_texture_paths.get(channel) or ""
+        if direct:
+            return direct
+        candidates = self.last_texture_sets.get(channel) or []
+        if candidates:
+            return candidates[0]
+        return ""
 
     def _get_or_create_texture_id(self, path: str):
         if not path:
