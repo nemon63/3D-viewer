@@ -28,14 +28,15 @@ class ModelLoadWorker(QObject):
     loaded = pyqtSignal(int, object)
     failed = pyqtSignal(int, str)
 
-    def __init__(self, request_id: int, file_path: str):
+    def __init__(self, request_id: int, file_path: str, fast_mode: bool):
         super().__init__()
         self.request_id = request_id
         self.file_path = file_path
+        self.fast_mode = fast_mode
 
     def run(self):
         try:
-            payload = load_model_payload(self.file_path)
+            payload = load_model_payload(self.file_path, fast_mode=self.fast_mode)
             self.loaded.emit(self.request_id, payload)
         except Exception as exc:
             self.failed.emit(self.request_id, str(exc))
@@ -60,6 +61,7 @@ class MainWindow(QMainWindow):
             ("normal", "Normal"),
         ]
         self.material_boxes = {}
+        self.render_mode = "quality"
         self._load_thread = None
         self._load_worker = None
         self._load_request_id = 0
@@ -161,6 +163,12 @@ class MainWindow(QMainWindow):
         self.projection_combo.currentIndexChanged.connect(self._on_projection_changed)
         camera_layout.addRow("Projection", self.projection_combo)
 
+        self.render_mode_combo = QComboBox(self)
+        self.render_mode_combo.addItem("Качественный", "quality")
+        self.render_mode_combo.addItem("Быстрый", "fast")
+        self.render_mode_combo.currentIndexChanged.connect(self._on_render_mode_changed)
+        camera_layout.addRow("Режим", self.render_mode_combo)
+
         self.rotate_speed_label = QLabel("1.00", self)
         self.rotate_speed_slider = QSlider(Qt.Horizontal, self)
         self.rotate_speed_slider.setRange(10, 300)
@@ -246,6 +254,7 @@ class MainWindow(QMainWindow):
         fill_light = self.settings.value("view/fill_light_slider", 100, type=int)
         bg_brightness = self.settings.value("view/bg_brightness_slider", 100, type=int)
         projection = self.settings.value("view/projection_mode", "perspective", type=str)
+        render_mode = self.settings.value("view/render_mode", "quality", type=str)
         shadows = self.settings.value("view/shadows_enabled", False, type=bool)
 
         self.rotate_speed_slider.setValue(max(self.rotate_speed_slider.minimum(), min(self.rotate_speed_slider.maximum(), rotate_speed)))
@@ -258,6 +267,9 @@ class MainWindow(QMainWindow):
         projection_idx = self.projection_combo.findData(projection)
         if projection_idx >= 0:
             self.projection_combo.setCurrentIndex(projection_idx)
+        mode_idx = self.render_mode_combo.findData(render_mode)
+        if mode_idx >= 0:
+            self.render_mode_combo.setCurrentIndex(mode_idx)
         self.shadows_checkbox.setChecked(bool(shadows))
 
     def _restore_last_directory(self):
@@ -477,8 +489,18 @@ class MainWindow(QMainWindow):
             self.settings.setValue("view/projection_mode", mode)
         self._update_status(self.model_list.currentRow())
 
+    def _on_render_mode_changed(self):
+        mode = self.render_mode_combo.currentData() or "quality"
+        self.render_mode = mode
+        self.gl_widget.set_fast_mode(mode == "fast")
+        if self._settings_ready:
+            self.settings.setValue("view/render_mode", mode)
+            row = self.model_list.currentRow()
+            if 0 <= row < len(self.model_files):
+                self._load_model_at_row(row)
+
     def _on_rotate_speed_changed(self, value: int):
-        speed = value / 100.0
+        speed = value / 500.0
         self.rotate_speed_label.setText(f"{speed:.2f}")
         self.gl_widget.set_rotate_speed(speed)
         if self._settings_ready:
@@ -547,6 +569,9 @@ class MainWindow(QMainWindow):
         idx = self.projection_combo.findData("perspective")
         if idx >= 0:
             self.projection_combo.setCurrentIndex(idx)
+        mode_idx = self.render_mode_combo.findData("quality")
+        if mode_idx >= 0:
+            self.render_mode_combo.setCurrentIndex(mode_idx)
         self.gl_widget.reset_view()
         self._sync_projection_combo()
         self._update_status(self.model_list.currentRow())
@@ -571,7 +596,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"Загрузка: {os.path.basename(file_path)} ...")
 
         thread = QThread(self)
-        worker = ModelLoadWorker(request_id, file_path)
+        worker = ModelLoadWorker(request_id, file_path, fast_mode=(self.render_mode == "fast"))
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.loaded.connect(self._on_model_loaded)

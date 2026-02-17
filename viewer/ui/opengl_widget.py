@@ -158,6 +158,7 @@ uniform int uUnlitTexturePreview;
 uniform int uUseAlphaCutout;
 uniform float uAlphaCutoff;
 uniform float uAmbientStrength;
+uniform int uFastMode;
 uniform int uShadowEnabled;
 uniform sampler2D uShadowMap;
 uniform vec2 uShadowTexelSize;
@@ -258,6 +259,10 @@ void main() {
     }
 
     if (uUnlitTexturePreview == 1 && uHasBase == 1) {
+        gl_FragColor = vec4(pow(base, vec3(1.0 / 2.2)), alpha);
+        return;
+    }
+    if (uFastMode == 1) {
         gl_FragColor = vec4(pow(base, vec3(1.0 / 2.2)), alpha);
         return;
     }
@@ -403,6 +408,7 @@ class OpenGLWidget(QOpenGLWidget):
         self.key_light_intensity = 18.0
         self.fill_light_intensity = 10.0
         self.alpha_cutoff = 0.5
+        self.fast_mode = False
         self.enable_ground_shadow = False
         self.shadow_requested = False
         self.shadow_status_message = "off"
@@ -634,6 +640,7 @@ class OpenGLWidget(QOpenGLWidget):
         self._set_sampler_uniform("uNormalTex", 3)
         self._set_sampler_uniform("uShadowMap", 4)
         self._set_int_uniform("uUnlitTexturePreview", 1 if self.unlit_texture_preview else 0)
+        self._set_int_uniform("uFastMode", 1 if self.fast_mode else 0)
         self._set_float_uniform("uAlphaCutoff", self.alpha_cutoff)
         self._set_float_uniform("uAmbientStrength", self.ambient_strength)
 
@@ -654,9 +661,14 @@ class OpenGLWidget(QOpenGLWidget):
 
     def _set_material_uniforms(self, texture_ids, has_base_alpha: bool):
         base_tex = int(texture_ids.get(CHANNEL_BASE, 0) or 0)
-        metal_tex = int(texture_ids.get(CHANNEL_METAL, 0) or 0)
-        rough_tex = int(texture_ids.get(CHANNEL_ROUGH, 0) or 0)
-        normal_tex = int(texture_ids.get(CHANNEL_NORMAL, 0) or 0)
+        if self.fast_mode:
+            metal_tex = 0
+            rough_tex = 0
+            normal_tex = 0
+        else:
+            metal_tex = int(texture_ids.get(CHANNEL_METAL, 0) or 0)
+            rough_tex = int(texture_ids.get(CHANNEL_ROUGH, 0) or 0)
+            normal_tex = int(texture_ids.get(CHANNEL_NORMAL, 0) or 0)
 
         self._bind_texture_unit(0, base_tex)
         self._bind_texture_unit(1, metal_tex)
@@ -849,6 +861,9 @@ class OpenGLWidget(QOpenGLWidget):
             if override is not None:
                 resolved[ch] = override
                 continue
+            if self.fast_mode and ch != CHANNEL_BASE:
+                resolved[ch] = ""
+                continue
             path = texture_paths.get(ch) or self.last_texture_paths.get(ch) or self._get_fallback_texture_path(ch)
             resolved[ch] = path or ""
 
@@ -885,6 +900,9 @@ class OpenGLWidget(QOpenGLWidget):
             return 0
 
     def _start_texture_warmup(self):
+        if self.fast_mode:
+            self._warmup_queue = []
+            return
         # Perceived performance: show model with base map first, then warm non-base maps incrementally.
         pending = []
         seen = set()
@@ -1064,6 +1082,11 @@ class OpenGLWidget(QOpenGLWidget):
         self.update()
 
     def set_shadows_enabled(self, enabled: bool):
+        if self.fast_mode and enabled:
+            self.enable_ground_shadow = False
+            self.shadow_status_message = "off (fast mode)"
+            self.update()
+            return False
         self.shadow_requested = bool(enabled)
         if not enabled:
             self.enable_ground_shadow = False
@@ -1163,6 +1186,11 @@ class OpenGLWidget(QOpenGLWidget):
         if isinstance(image, np.ndarray):
             arr = image
         elif Image is not None and isinstance(image, Image.Image):
+            if self.fast_mode:
+                max_dim = 1024
+                if max(image.size) > max_dim:
+                    image = image.copy()
+                    image.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS)
             if image.mode not in ("RGB", "RGBA"):
                 image = image.convert("RGBA")
             arr = np.array(image, dtype=np.uint8)
@@ -1302,3 +1330,10 @@ class OpenGLWidget(QOpenGLWidget):
                 pass
             self.depth_shader_program = None
         super().closeEvent(event)
+
+    def set_fast_mode(self, enabled: bool):
+        self.fast_mode = bool(enabled)
+        if self.fast_mode and self.enable_ground_shadow:
+            self.enable_ground_shadow = False
+            self.shadow_status_message = "off (fast mode)"
+        self.update()

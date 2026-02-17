@@ -34,13 +34,13 @@ class MeshPayload:
     debug_info: dict = field(default_factory=dict)
 
 
-def load_model_payload(file_path: str) -> MeshPayload:
+def load_model_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
     if file_path.lower().endswith(".fbx"):
-        return _load_fbx_payload(file_path)
-    return _load_trimesh_payload(file_path)
+        return _load_fbx_payload(file_path, fast_mode=fast_mode)
+    return _load_trimesh_payload(file_path, fast_mode=fast_mode)
 
 
-def _load_trimesh_payload(file_path: str) -> MeshPayload:
+def _load_trimesh_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
     scene_or_mesh = trimesh.load(file_path)
     if isinstance(scene_or_mesh, trimesh.Scene):
         meshes = _extract_scene_meshes(scene_or_mesh)
@@ -49,7 +49,12 @@ def _load_trimesh_payload(file_path: str) -> MeshPayload:
 
         loader_name = "trimesh_scene_single" if len(meshes) == 1 else "trimesh_scene_multi"
         combined_vertices, combined_indices, combined_normals, combined_texcoords = _combine_scene_meshes(meshes)
-        vertices, indices, normals = process_mesh_data(combined_vertices, combined_indices, combined_normals)
+        vertices, indices, normals = process_mesh_data(
+            combined_vertices,
+            combined_indices,
+            combined_normals,
+            recompute_normals=not fast_mode,
+        )
         texcoords = np.array(combined_texcoords, dtype=np.float32)
         if texcoords.ndim != 2 or texcoords.shape[1] != 2 or texcoords.shape[0] != vertices.shape[0]:
             texcoords = np.array([], dtype=np.float32)
@@ -78,7 +83,12 @@ def _load_trimesh_payload(file_path: str) -> MeshPayload:
             },
         )
 
-    vertices, indices, normals = process_mesh_data(scene_or_mesh.vertices, scene_or_mesh.faces, [])
+    vertices, indices, normals = process_mesh_data(
+        scene_or_mesh.vertices,
+        scene_or_mesh.faces,
+        [],
+        recompute_normals=not fast_mode,
+    )
     texcoords = _extract_trimesh_uv(scene_or_mesh)
     texture_candidates = find_texture_candidates(file_path)
     texture_sets = group_texture_candidates(texture_candidates)
@@ -187,7 +197,7 @@ def _merge_texture_paths(primary_paths: dict, fallback_sets: dict):
     return merged
 
 
-def _load_fbx_payload(file_path: str) -> MeshPayload:
+def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
     if fbx is None:
         raise RuntimeError("FBX SDK is not installed.")
 
@@ -214,7 +224,12 @@ def _load_fbx_payload(file_path: str) -> MeshPayload:
             submesh_groups,
             material_textures,
         ) = _parse_fbx_scene(scene, model_dir=model_dir)
-        vertices, indices, normals = process_mesh_data(vertices_raw, indices_raw, normals_raw)
+        vertices, indices, normals = process_mesh_data(
+            vertices_raw,
+            indices_raw,
+            normals_raw,
+            recompute_normals=not fast_mode,
+        )
 
         texcoords = np.array(texcoords_raw, dtype=np.float32)
         if texcoords.ndim != 2 or texcoords.shape[1] != 2:
@@ -300,6 +315,7 @@ def _parse_fbx_scene(scene, model_dir: str):
     uv_found_count = 0
     uv_missing_count = 0
     mesh_count = 0
+    multi_material_mesh_count = 0
     first_uv_set = None
 
     mesh_attr_type = _get_fbx_mesh_attr_type()
@@ -317,20 +333,22 @@ def _parse_fbx_scene(scene, model_dir: str):
         control_points = mesh.GetControlPoints()
         uv_set_name = _get_fbx_uv_set_name(mesh)
         polygon_materials = _get_polygon_material_indices(mesh)
+        is_multi_material = _mesh_uses_multiple_materials(node, polygon_materials)
+        if is_multi_material:
+            multi_material_mesh_count += 1
         if first_uv_set is None:
             first_uv_set = uv_set_name
         cp_normals = _compute_smooth_control_point_normals(mesh, control_points)
         object_name = str(node.GetName() or f"node_{i}")
 
-        for j in range(mesh.GetPolygonCount()):
-            poly_size = mesh.GetPolygonSize(j)
-            polygon = [mesh.GetPolygonVertex(j, k) for k in range(poly_size)]
-            if poly_size < 3:
-                continue
-            material_index = polygon_materials[j] if j < len(polygon_materials) else -1
-            material = _safe_get_node_material(node, material_index)
-            material_uid = _material_uid(material, fallback_index=material_index)
-            material_name = _material_name(material, fallback_index=material_index)
+        shared_group = None
+        if not is_multi_material:
+            shared_index = _first_valid_material_index(polygon_materials)
+            if shared_index < 0 and node is not None and node.GetMaterialCount() > 0:
+                shared_index = 0
+            material = _safe_get_node_material(node, shared_index)
+            material_uid = _material_uid(material, fallback_index=shared_index)
+            material_name = _material_name(material, fallback_index=shared_index)
             if material_uid not in material_textures:
                 material_textures[material_uid] = _collect_material_texture_sets(material, model_dir)
             group_key = (object_name, material_uid)
@@ -341,6 +359,31 @@ def _parse_fbx_scene(scene, model_dir: str):
                     "material_uid": material_uid,
                     "indices": [],
                 }
+            shared_group = submesh_groups[group_key]
+
+        for j in range(mesh.GetPolygonCount()):
+            poly_size = mesh.GetPolygonSize(j)
+            polygon = [mesh.GetPolygonVertex(j, k) for k in range(poly_size)]
+            if poly_size < 3:
+                continue
+            if is_multi_material:
+                material_index = polygon_materials[j] if j < len(polygon_materials) else -1
+                material = _safe_get_node_material(node, material_index)
+                material_uid = _material_uid(material, fallback_index=material_index)
+                material_name = _material_name(material, fallback_index=material_index)
+                if material_uid not in material_textures:
+                    material_textures[material_uid] = _collect_material_texture_sets(material, model_dir)
+                group_key = (object_name, material_uid)
+                if group_key not in submesh_groups:
+                    submesh_groups[group_key] = {
+                        "object_name": object_name,
+                        "material_name": material_name,
+                        "material_uid": material_uid,
+                        "indices": [],
+                    }
+                target_group = submesh_groups[group_key]
+            else:
+                target_group = shared_group
 
             for k in range(1, poly_size - 1):
                 tri_slots = (0, k, k + 1)
@@ -378,15 +421,35 @@ def _parse_fbx_scene(scene, model_dir: str):
                     texcoords.append([float(uv[0]), float(uv[1])])
                     vert_index = len(vertices) - 1
                     indices.append(vert_index)
-                    submesh_groups[group_key]["indices"].append(vert_index)
+                    target_group["indices"].append(vert_index)
 
     debug = {
         "fbx_mesh_count": mesh_count,
+        "fbx_multi_material_mesh_count": multi_material_mesh_count,
         "fbx_uv_set": first_uv_set,
         "fbx_uv_found": uv_found_count,
         "fbx_uv_missing": uv_missing_count,
     }
     return vertices, indices, normals, texcoords, debug, submesh_groups, material_textures
+
+
+def _first_valid_material_index(indices):
+    for idx in indices:
+        if idx >= 0:
+            return int(idx)
+    return -1
+
+
+def _mesh_uses_multiple_materials(node, polygon_materials):
+    if node is None:
+        return False
+    try:
+        if node.GetMaterialCount() <= 1:
+            return False
+    except Exception:
+        return False
+    unique = {int(i) for i in polygon_materials if int(i) >= 0}
+    return len(unique) > 1
 
 
 def _compute_smooth_control_point_normals(mesh, control_points):
