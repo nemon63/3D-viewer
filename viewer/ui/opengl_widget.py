@@ -298,6 +298,57 @@ void main() {
 }
 """
 
+VERTEX_SHADER_SHADOW_CATCHER_SRC = """
+#version 120
+varying vec4 vShadowCoord;
+uniform mat4 uLightVP;
+
+void main() {
+    vShadowCoord = uLightVP * gl_Vertex;
+    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+}
+"""
+
+FRAGMENT_SHADER_SHADOW_CATCHER_SRC = """
+#version 120
+varying vec4 vShadowCoord;
+uniform int uShadowEnabled;
+uniform sampler2D uShadowMap;
+uniform vec2 uShadowTexelSize;
+uniform float uShadowOpacity;
+
+float computeShadow() {
+    if (uShadowEnabled == 0) {
+        return 1.0;
+    }
+
+    vec3 proj = vShadowCoord.xyz / max(vShadowCoord.w, 0.0001);
+    vec2 uv = proj.xy * 0.5 + 0.5;
+    float currentDepth = proj.z * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || currentDepth > 1.0) {
+        return 1.0;
+    }
+
+    float bias = 0.0015;
+    float shadow = 0.0;
+    for (int x = -1; x <= 1; ++x) {
+        for (int y = -1; y <= 1; ++y) {
+            vec2 offset = vec2(float(x), float(y)) * uShadowTexelSize;
+            float depthFromMap = texture2D(uShadowMap, uv + offset).r;
+            shadow += (currentDepth - bias > depthFromMap) ? 1.0 : 0.0;
+        }
+    }
+    shadow /= 9.0;
+    return 1.0 - shadow;
+}
+
+void main() {
+    float lightVisibility = computeShadow();
+    float alpha = (1.0 - lightVisibility) * uShadowOpacity;
+    gl_FragColor = vec4(0.0, 0.0, 0.0, alpha);
+}
+"""
+
 
 class OpenGLWidget(QOpenGLWidget):
     def __init__(self, parent=None):
@@ -360,7 +411,9 @@ class OpenGLWidget(QOpenGLWidget):
         self.shadow_fbo = 0
         self.shadow_depth_tex = 0
         self.depth_shader_program = None
+        self.shadow_catcher_program = None
         self._light_vp = np.identity(4, dtype=np.float32)
+        self.shadow_catcher_opacity = 0.42
 
         self._inertia_timer = QTimer(self)
         self._inertia_timer.setInterval(16)
@@ -382,6 +435,10 @@ class OpenGLWidget(QOpenGLWidget):
         self.shader_program = compileProgram(
             compileShader(VERTEX_SHADER_SRC, GL_VERTEX_SHADER),
             compileShader(FRAGMENT_SHADER_SRC, GL_FRAGMENT_SHADER),
+        )
+        self.shadow_catcher_program = compileProgram(
+            compileShader(VERTEX_SHADER_SHADOW_CATCHER_SRC, GL_VERTEX_SHADER),
+            compileShader(FRAGMENT_SHADER_SHADOW_CATCHER_SRC, GL_FRAGMENT_SHADER),
         )
 
     def _init_shadow_pipeline(self):
@@ -547,8 +604,6 @@ class OpenGLWidget(QOpenGLWidget):
         glRotatef(self.angle_x, 1, 0, 0)
         glRotatef(self.angle_y, 0, 1, 0)
 
-        self._draw_ground_plane()
-
         if self.vertices.size == 0 or self.indices.size == 0 or self.shader_program is None:
             return
 
@@ -569,6 +624,8 @@ class OpenGLWidget(QOpenGLWidget):
             self._unbind_texture_units()
             glUseProgram(0)
             glPopMatrix()
+
+        self._draw_shadow_catcher()
 
     def _set_common_uniforms(self):
         self._set_sampler_uniform("uBaseColorTex", 0)
@@ -673,20 +730,45 @@ class OpenGLWidget(QOpenGLWidget):
         glMatrixMode(GL_MODELVIEW)
         glEnable(GL_DEPTH_TEST)
 
-    def _draw_ground_plane(self):
-        glUseProgram(0)
-        glDisable(GL_TEXTURE_2D)
-        size = max(1.6, self.model_radius * 3.0)
-        ground_y = 0.0
+    def _draw_shadow_catcher(self):
+        if self.shadow_catcher_program is None:
+            return
+        if not (self.enable_ground_shadow and self.shadow_depth_tex):
+            return
 
-        glBegin(GL_QUADS)
-        glColor3f(0.07, 0.08, 0.10)
-        glVertex3f(-size, ground_y, -size)
-        glVertex3f(size, ground_y, -size)
-        glColor3f(0.04, 0.05, 0.06)
-        glVertex3f(size, ground_y, size)
-        glVertex3f(-size, ground_y, size)
-        glEnd()
+        size = max(1.6, self.model_radius * 3.0)
+        y = 0.001
+        texel = 1.0 / float(max(self.shadow_size, 1))
+
+        glUseProgram(self.shadow_catcher_program)
+        try:
+            self._set_matrix_uniform("uLightVP", self._light_vp, program=self.shadow_catcher_program)
+            loc = glGetUniformLocation(self.shadow_catcher_program, "uShadowEnabled")
+            if loc != -1:
+                glUniform1i(loc, 1)
+            loc = glGetUniformLocation(self.shadow_catcher_program, "uShadowMap")
+            if loc != -1:
+                glUniform1i(loc, 4)
+            loc = glGetUniformLocation(self.shadow_catcher_program, "uShadowTexelSize")
+            if loc != -1:
+                glUniform2f(loc, texel, texel)
+            loc = glGetUniformLocation(self.shadow_catcher_program, "uShadowOpacity")
+            if loc != -1:
+                glUniform1f(loc, float(self.shadow_catcher_opacity))
+            self._bind_texture_unit(4, self.shadow_depth_tex)
+
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            glBegin(GL_QUADS)
+            glVertex3f(-size, y, -size)
+            glVertex3f(size, y, -size)
+            glVertex3f(size, y, size)
+            glVertex3f(-size, y, size)
+            glEnd()
+            glDisable(GL_BLEND)
+        finally:
+            self._unbind_texture_units()
+            glUseProgram(0)
 
     def _render_shadow_map(self):
         target = np.array([0.0, self.model_target_y, 0.0], dtype=np.float32)
@@ -1207,6 +1289,12 @@ class OpenGLWidget(QOpenGLWidget):
             except Exception:
                 pass
             self.shader_program = None
+        if self.shadow_catcher_program:
+            try:
+                glDeleteProgram(self.shadow_catcher_program)
+            except Exception:
+                pass
+            self.shadow_catcher_program = None
         if self.depth_shader_program:
             try:
                 glDeleteProgram(self.depth_shader_program)

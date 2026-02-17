@@ -48,6 +48,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.gl_widget = OpenGLWidget(self)
         self.settings = QSettings("3d-viewer", "model-browser")
+        self._settings_ready = False
         self.current_directory = ""
         self.model_files = []
         self.current_file_path = ""
@@ -65,6 +66,8 @@ class MainWindow(QMainWindow):
         self._active_load_row = -1
         self.init_ui()
         self._register_shortcuts()
+        self._restore_view_settings()
+        self._settings_ready = True
         self._restore_last_directory()
 
     def init_ui(self):
@@ -148,6 +151,10 @@ class MainWindow(QMainWindow):
         reset_button.clicked.connect(self.gl_widget.reset_view)
         camera_layout.addRow(reset_button)
 
+        reset_camera_settings_button = QPushButton("Сбросить камеру", self)
+        reset_camera_settings_button.clicked.connect(self._reset_camera_settings)
+        camera_layout.addRow(reset_camera_settings_button)
+
         self.projection_combo = QComboBox(self)
         self.projection_combo.addItem("Perspective", "perspective")
         self.projection_combo.addItem("Orthographic", "orthographic")
@@ -212,6 +219,10 @@ class MainWindow(QMainWindow):
         self.shadows_checkbox.stateChanged.connect(self._on_shadows_toggled)
         light_layout.addRow(self.shadows_checkbox)
 
+        reset_light_settings_button = QPushButton("Сбросить свет", self)
+        reset_light_settings_button.clicked.connect(self._reset_light_settings)
+        light_layout.addRow(reset_light_settings_button)
+
         controls_tabs.addTab(light_group, "Свет")
         panel_layout.addWidget(controls_tabs)
 
@@ -226,6 +237,28 @@ class MainWindow(QMainWindow):
         self._on_fill_light_changed(self.fill_light_slider.value())
         self._on_background_brightness_changed(self.bg_brightness_slider.value())
         self._on_shadows_toggled(Qt.Unchecked)
+
+    def _restore_view_settings(self):
+        rotate_speed = self.settings.value("view/rotate_speed_slider", 100, type=int)
+        zoom_speed = self.settings.value("view/zoom_speed_slider", 110, type=int)
+        ambient = self.settings.value("view/ambient_slider", 8, type=int)
+        key_light = self.settings.value("view/key_light_slider", 180, type=int)
+        fill_light = self.settings.value("view/fill_light_slider", 100, type=int)
+        bg_brightness = self.settings.value("view/bg_brightness_slider", 100, type=int)
+        projection = self.settings.value("view/projection_mode", "perspective", type=str)
+        shadows = self.settings.value("view/shadows_enabled", False, type=bool)
+
+        self.rotate_speed_slider.setValue(max(self.rotate_speed_slider.minimum(), min(self.rotate_speed_slider.maximum(), rotate_speed)))
+        self.zoom_speed_slider.setValue(max(self.zoom_speed_slider.minimum(), min(self.zoom_speed_slider.maximum(), zoom_speed)))
+        self.ambient_slider.setValue(max(self.ambient_slider.minimum(), min(self.ambient_slider.maximum(), ambient)))
+        self.key_light_slider.setValue(max(self.key_light_slider.minimum(), min(self.key_light_slider.maximum(), key_light)))
+        self.fill_light_slider.setValue(max(self.fill_light_slider.minimum(), min(self.fill_light_slider.maximum(), fill_light)))
+        self.bg_brightness_slider.setValue(max(self.bg_brightness_slider.minimum(), min(self.bg_brightness_slider.maximum(), bg_brightness)))
+
+        projection_idx = self.projection_combo.findData(projection)
+        if projection_idx >= 0:
+            self.projection_combo.setCurrentIndex(projection_idx)
+        self.shadows_checkbox.setChecked(bool(shadows))
 
     def _restore_last_directory(self):
         last_directory = self.settings.value("last_directory", "", type=str)
@@ -440,37 +473,51 @@ class MainWindow(QMainWindow):
     def _on_projection_changed(self):
         mode = self.projection_combo.currentData()
         self.gl_widget.set_projection_mode(mode)
+        if self._settings_ready:
+            self.settings.setValue("view/projection_mode", mode)
         self._update_status(self.model_list.currentRow())
 
     def _on_rotate_speed_changed(self, value: int):
         speed = value / 100.0
         self.rotate_speed_label.setText(f"{speed:.2f}")
         self.gl_widget.set_rotate_speed(speed)
+        if self._settings_ready:
+            self.settings.setValue("view/rotate_speed_slider", int(value))
 
     def _on_zoom_speed_changed(self, value: int):
         speed = value / 100.0
         self.zoom_speed_label.setText(f"{speed:.2f}")
         self.gl_widget.set_zoom_speed(speed)
+        if self._settings_ready:
+            self.settings.setValue("view/zoom_speed_slider", int(value))
 
     def _on_ambient_changed(self, value: int):
         ambient = value / 100.0
         self.ambient_label.setText(f"{ambient:.2f}")
         self.gl_widget.set_ambient_strength(ambient)
+        if self._settings_ready:
+            self.settings.setValue("view/ambient_slider", int(value))
 
     def _on_key_light_changed(self, value: int):
         intensity = value / 10.0
         self.key_light_label.setText(f"{intensity:.1f}")
         self.gl_widget.set_key_light_intensity(intensity)
+        if self._settings_ready:
+            self.settings.setValue("view/key_light_slider", int(value))
 
     def _on_fill_light_changed(self, value: int):
         intensity = value / 10.0
         self.fill_light_label.setText(f"{intensity:.1f}")
         self.gl_widget.set_fill_light_intensity(intensity)
+        if self._settings_ready:
+            self.settings.setValue("view/fill_light_slider", int(value))
 
     def _on_background_brightness_changed(self, value: int):
         brightness = value / 100.0
         self.bg_brightness_label.setText(f"{brightness:.2f}")
         self.gl_widget.set_background_brightness(brightness)
+        if self._settings_ready:
+            self.settings.setValue("view/bg_brightness_slider", int(value))
 
     def _on_shadows_toggled(self, state: int):
         enabled = state == Qt.Checked
@@ -479,6 +526,11 @@ class MainWindow(QMainWindow):
             self.shadows_checkbox.blockSignals(True)
             self.shadows_checkbox.setChecked(False)
             self.shadows_checkbox.blockSignals(False)
+            if self._settings_ready:
+                self.settings.setValue("view/shadows_enabled", False)
+        else:
+            if self._settings_ready:
+                self.settings.setValue("view/shadows_enabled", bool(active))
         self._update_status(self.model_list.currentRow())
 
     def _sync_projection_combo(self):
@@ -488,6 +540,24 @@ class MainWindow(QMainWindow):
             self.projection_combo.blockSignals(True)
             self.projection_combo.setCurrentIndex(index)
             self.projection_combo.blockSignals(False)
+
+    def _reset_camera_settings(self):
+        self.rotate_speed_slider.setValue(100)
+        self.zoom_speed_slider.setValue(110)
+        idx = self.projection_combo.findData("perspective")
+        if idx >= 0:
+            self.projection_combo.setCurrentIndex(idx)
+        self.gl_widget.reset_view()
+        self._sync_projection_combo()
+        self._update_status(self.model_list.currentRow())
+
+    def _reset_light_settings(self):
+        self.ambient_slider.setValue(8)
+        self.key_light_slider.setValue(180)
+        self.fill_light_slider.setValue(100)
+        self.bg_brightness_slider.setValue(100)
+        self.shadows_checkbox.setChecked(False)
+        self._update_status(self.model_list.currentRow())
 
     def _start_async_model_load(self, row: int, file_path: str):
         self._load_request_id += 1
