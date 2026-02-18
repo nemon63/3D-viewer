@@ -4,6 +4,7 @@ from PyQt5.QtCore import QSettings, QSize, Qt, QThread, QTimer
 from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
+    QAction,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -25,6 +26,7 @@ from PyQt5.QtWidgets import (
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
+    QToolBar,
 )
 
 from viewer.ui.opengl_widget import OpenGLWidget
@@ -85,6 +87,9 @@ class MainWindow(QMainWindow):
         self.catalog_panel = None
         self.settings_dock = None
         self._syncing_filters_from_dock = False
+        self.main_toolbar = None
+        self.action_show_catalog = None
+        self.action_show_settings = None
         self.init_ui()
         self._register_shortcuts()
         self._restore_view_settings()
@@ -314,8 +319,8 @@ class MainWindow(QMainWindow):
         controls_tabs.addTab(light_group, "Свет")
         self.controls_tabs = controls_tabs
 
-        root_layout.addWidget(browser_panel)
         root_layout.addWidget(self.gl_widget, stretch=1)
+        self._init_main_toolbar()
         self._init_catalog_dock()
         self._init_settings_dock()
 
@@ -328,6 +333,42 @@ class MainWindow(QMainWindow):
         self._on_background_brightness_changed(self.bg_brightness_slider.value())
         self._on_shadows_toggled(Qt.Unchecked)
         self.statusBar().showMessage("Готово")
+
+    def _init_main_toolbar(self):
+        toolbar = QToolBar("Main", self)
+        toolbar.setMovable(False)
+        self.addToolBar(Qt.TopToolBarArea, toolbar)
+
+        act_choose = QAction("Папка", self)
+        act_choose.triggered.connect(self.choose_directory)
+        toolbar.addAction(act_choose)
+
+        act_reload = QAction("Обновить", self)
+        act_reload.triggered.connect(self.reload_directory)
+        toolbar.addAction(act_reload)
+
+        act_scan = QAction("Скан", self)
+        act_scan.triggered.connect(self._scan_catalog_now)
+        toolbar.addAction(act_scan)
+
+        act_log = QAction("Лог каталога", self)
+        act_log.triggered.connect(self._open_catalog_dialog)
+        toolbar.addAction(act_log)
+
+        toolbar.addSeparator()
+
+        self.action_show_catalog = QAction("Каталог", self)
+        self.action_show_catalog.triggered.connect(self._show_catalog_dock)
+        toolbar.addAction(self.action_show_catalog)
+
+        self.action_show_settings = QAction("Настройки", self)
+        self.action_show_settings.triggered.connect(self._show_settings_dock)
+        toolbar.addAction(self.action_show_settings)
+
+        act_layout = QAction("Сброс layout", self)
+        act_layout.triggered.connect(self._reset_workspace_layout)
+        toolbar.addAction(act_layout)
+        self.main_toolbar = toolbar
 
     def _init_catalog_dock(self):
         dock = QDockWidget("Каталог (превью)", self)
@@ -350,8 +391,8 @@ class MainWindow(QMainWindow):
         panel.filtersChanged.connect(self._on_dock_filters_changed)
         panel.thumbSizeChanged.connect(self._on_catalog_thumb_size_changed)
         dock.setWidget(panel)
-        self.addDockWidget(Qt.RightDockWidgetArea, dock)
-        dock.setFloating(True)
+        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
+        dock.setFloating(False)
         dock.resize(620, 760)
         self.catalog_dock = dock
         self.catalog_panel = panel
@@ -366,6 +407,7 @@ class MainWindow(QMainWindow):
         )
         dock.setWidget(self.controls_tabs)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
+        dock.setFloating(False)
         self.settings_dock = dock
 
     def _restore_view_settings(self):
@@ -1199,13 +1241,29 @@ class MainWindow(QMainWindow):
         if self.catalog_dock is None:
             return
         self.catalog_dock.show()
+        if self.catalog_dock.isFloating():
+            self.catalog_dock.setFloating(False)
+            self.addDockWidget(Qt.LeftDockWidgetArea, self.catalog_dock)
         self.catalog_dock.raise_()
 
     def _show_settings_dock(self):
         if self.settings_dock is None:
             return
         self.settings_dock.show()
+        if self.settings_dock.isFloating():
+            self.settings_dock.setFloating(False)
+            self.addDockWidget(Qt.RightDockWidgetArea, self.settings_dock)
         self.settings_dock.raise_()
+
+    def _reset_workspace_layout(self):
+        if self.catalog_dock is not None:
+            self.catalog_dock.setFloating(False)
+            self.addDockWidget(Qt.LeftDockWidgetArea, self.catalog_dock)
+            self.catalog_dock.show()
+        if self.settings_dock is not None:
+            self.settings_dock.setFloating(False)
+            self.addDockWidget(Qt.RightDockWidgetArea, self.settings_dock)
+            self.settings_dock.show()
 
     def _build_catalog_dialog(self):
         dialog = QDialog(self)
