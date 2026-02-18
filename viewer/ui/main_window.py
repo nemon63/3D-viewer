@@ -89,11 +89,18 @@ class MainWindow(QMainWindow):
         self.settings_dock = None
         self._syncing_filters_from_dock = False
         self.main_toolbar = None
+        self._batch_running = False
+        self._batch_paused = False
+        self._batch_paths = []
+        self._batch_index = 0
+        self._batch_current_path = ""
         self.init_ui()
         self._register_shortcuts()
         self._restore_view_settings()
         self._settings_ready = True
         self._restore_last_directory()
+        self._restore_batch_state()
+        self._update_batch_ui()
 
     def _set_status_text(self, text: str):
         self.status_label.setText(text)
@@ -412,12 +419,16 @@ class MainWindow(QMainWindow):
         panel.toggleFavoriteRequested.connect(self._toggle_current_favorite)
         panel.filtersChanged.connect(self._on_dock_filters_changed)
         panel.thumbSizeChanged.connect(self._on_catalog_thumb_size_changed)
+        panel.batchStartRequested.connect(self._start_preview_batch)
+        panel.batchStopRequested.connect(self._stop_preview_batch)
+        panel.batchResumeRequested.connect(self._resume_preview_batch)
         dock.setWidget(panel)
         self.addDockWidget(Qt.LeftDockWidgetArea, dock)
         dock.setFloating(False)
         dock.resize(620, 760)
         self.catalog_dock = dock
         self.catalog_panel = panel
+        self._update_batch_ui()
 
     def _init_settings_dock(self):
         dock = QDockWidget("Настройки (материал/камера/свет)", self)
@@ -503,6 +514,7 @@ class MainWindow(QMainWindow):
         self._refresh_favorites_from_db()
         self._apply_model_filters(keep_selection=False)
         self._start_index_scan(directory)
+        self._update_batch_ui()
 
         if not self.filtered_model_files:
             self._set_status_text("В выбранной папке нет поддерживаемых моделей.")
@@ -1016,6 +1028,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"3D Viewer - {os.path.basename(file_path)}")
         if file_path:
             force = bool(self._force_preview_for_path) and os.path.normcase(os.path.normpath(self._force_preview_for_path)) == os.path.normcase(os.path.normpath(file_path))
+            if self._batch_running and self._batch_current_path:
+                force = True
             if force:
                 self._force_preview_for_path = ""
             QTimer.singleShot(180, lambda p=file_path, f=force: self._capture_model_preview(p, force=f))
@@ -1030,6 +1044,8 @@ class MainWindow(QMainWindow):
         self.prev_button.setEnabled(True)
         self.next_button.setEnabled(True)
         self._set_status_text(f"Ошибка загрузки: {error_text}")
+        if self._batch_running:
+            self._advance_batch_after_item()
 
     def _start_index_scan(self, directory: str):
         if not directory:
@@ -1143,6 +1159,127 @@ class MainWindow(QMainWindow):
             only_fav=self.only_favorites_checkbox.isChecked(),
         )
 
+    def _start_preview_batch(self):
+        if not self.current_directory:
+            self._set_status_text("Сначала выбери папку с моделями.")
+            return
+        targets = []
+        for path in self.model_files:
+            preview_path = build_preview_path_for_model(path, size=self._thumb_size)
+            if not os.path.isfile(preview_path):
+                targets.append(path)
+        self._batch_paths = targets
+        self._batch_index = 0
+        self._batch_paused = False
+        self._batch_running = bool(self._batch_paths)
+        self._batch_current_path = ""
+        self._save_batch_state()
+        self._update_batch_ui()
+        if not self._batch_running:
+            self._set_status_text("Batch: все превью уже готовы.")
+            return
+        self._set_status_text(f"Batch: старт ({len(self._batch_paths)} моделей)")
+        self._run_next_batch_item()
+
+    def _stop_preview_batch(self):
+        if not self._batch_running:
+            return
+        self._batch_running = False
+        self._batch_paused = True
+        self._batch_current_path = ""
+        self._save_batch_state()
+        self._update_batch_ui()
+        self._set_status_text("Batch: остановлен (можно продолжить).")
+
+    def _resume_preview_batch(self):
+        if not self._batch_paths:
+            self._set_status_text("Batch: нечего продолжать.")
+            return
+        if self._batch_index >= len(self._batch_paths):
+            self._set_status_text("Batch: уже завершен.")
+            return
+        self._batch_running = True
+        self._batch_paused = False
+        self._save_batch_state()
+        self._update_batch_ui()
+        self._set_status_text(
+            f"Batch: продолжение ({self._batch_index + 1}/{len(self._batch_paths)})"
+        )
+        self._run_next_batch_item()
+
+    def _run_next_batch_item(self):
+        if not self._batch_running:
+            return
+        while self._batch_index < len(self._batch_paths):
+            path = self._batch_paths[self._batch_index]
+            if os.path.isfile(path):
+                self._batch_current_path = path
+                self._update_batch_ui()
+                self._open_model_by_path(path)
+                return
+            self._batch_index += 1
+        self._finish_preview_batch()
+
+    def _advance_batch_after_item(self):
+        if not self._batch_running:
+            return
+        self._batch_index += 1
+        self._batch_current_path = ""
+        self._save_batch_state()
+        self._update_batch_ui()
+        QTimer.singleShot(10, self._run_next_batch_item)
+
+    def _finish_preview_batch(self):
+        self._batch_running = False
+        self._batch_paused = False
+        done = len(self._batch_paths)
+        self._batch_paths = []
+        self._batch_index = 0
+        self._batch_current_path = ""
+        self._save_batch_state()
+        self._update_batch_ui()
+        self._set_status_text(f"Batch: завершено, обработано {done} моделей.")
+
+    def _save_batch_state(self):
+        try:
+            self.settings.setValue("batch/paths_json", json.dumps(self._batch_paths, ensure_ascii=False))
+            self.settings.setValue("batch/index", int(self._batch_index))
+            self.settings.setValue("batch/paused", bool(self._batch_paused))
+        except Exception:
+            pass
+
+    def _restore_batch_state(self):
+        try:
+            raw = self.settings.value("batch/paths_json", "[]", type=str)
+            paths = json.loads(raw) if raw else []
+            if not isinstance(paths, list):
+                paths = []
+        except Exception:
+            paths = []
+        idx = self.settings.value("batch/index", 0, type=int)
+        paused = self.settings.value("batch/paused", False, type=bool)
+        valid_paths = [p for p in paths if isinstance(p, str) and os.path.isfile(p)]
+        self._batch_paths = valid_paths
+        self._batch_index = max(0, min(int(idx), len(self._batch_paths)))
+        self._batch_paused = bool(paused and self._batch_paths and self._batch_index < len(self._batch_paths))
+        self._batch_running = False
+        self._batch_current_path = ""
+
+    def _update_batch_ui(self):
+        if self.catalog_panel is None:
+            return
+        total = len(self._batch_paths)
+        current = min(self._batch_index, total)
+        if self._batch_running:
+            text = f"Batch: {current + 1}/{total}"
+        elif self._batch_paused and total:
+            text = f"Batch: пауза {current}/{total}"
+        elif total:
+            text = f"Batch: готово {current}/{total}"
+        else:
+            text = "Batch: idle"
+        self.catalog_panel.set_batch_status(text, running=self._batch_running, paused=self._batch_paused)
+
     def _apply_model_filters(self, keep_selection=True):
         prev_path = ""
         if keep_selection:
@@ -1225,6 +1362,12 @@ class MainWindow(QMainWindow):
     def _capture_model_preview(self, file_path: str, force: bool = False):
         if not file_path:
             return
+        should_advance_batch = (
+            self._batch_running
+            and bool(self._batch_current_path)
+            and os.path.normcase(os.path.normpath(self._batch_current_path))
+            == os.path.normcase(os.path.normpath(file_path))
+        )
         expected_path = build_preview_path_for_model(file_path, size=self._thumb_size)
         if (not force) and os.path.isfile(expected_path):
             norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
@@ -1237,6 +1380,8 @@ class MainWindow(QMainWindow):
                     item.setIcon(0, icon)
                 if self.catalog_panel is not None:
                     self.catalog_panel.set_item_icon(file_path, expected_path)
+            if should_advance_batch:
+                self._advance_batch_after_item()
             return
         try:
             image = self.gl_widget.grabFramebuffer()
@@ -1261,6 +1406,8 @@ class MainWindow(QMainWindow):
             item.setIcon(0, icon)
         if self.catalog_panel is not None:
             self.catalog_panel.set_item_icon(file_path, preview_path)
+        if should_advance_batch:
+            self._advance_batch_after_item()
 
     def _regenerate_preview_for_path(self, file_path: str):
         if not file_path:

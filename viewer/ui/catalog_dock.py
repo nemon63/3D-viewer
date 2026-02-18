@@ -68,6 +68,9 @@ class CatalogDockPanel(QWidget):
     toggleFavoriteRequested = pyqtSignal()
     filtersChanged = pyqtSignal(str, str, bool)
     thumbSizeChanged = pyqtSignal(int)
+    batchStartRequested = pyqtSignal()
+    batchStopRequested = pyqtSignal()
+    batchResumeRequested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -98,6 +101,14 @@ class CatalogDockPanel(QWidget):
         self.open_button = QPushButton("Открыть в 3D", self)
         self.open_button.clicked.connect(self._open_selected)
 
+        self.batch_start_button = QPushButton("Старт batch", self)
+        self.batch_start_button.clicked.connect(self.batchStartRequested.emit)
+        self.batch_stop_button = QPushButton("Стоп", self)
+        self.batch_stop_button.clicked.connect(self.batchStopRequested.emit)
+        self.batch_resume_button = QPushButton("Продолжить", self)
+        self.batch_resume_button.clicked.connect(self.batchResumeRequested.emit)
+        self.batch_status_label = QLabel("Batch: idle", self)
+
         layout = QVBoxLayout(self)
         top_row = QHBoxLayout()
         top_row.addWidget(self.choose_button)
@@ -119,6 +130,12 @@ class CatalogDockPanel(QWidget):
 
         hint = QLabel("Ctrl + колесо: размер миниатюр", self)
         layout.addWidget(hint)
+        batch_row = QHBoxLayout()
+        batch_row.addWidget(self.batch_start_button)
+        batch_row.addWidget(self.batch_stop_button)
+        batch_row.addWidget(self.batch_resume_button)
+        layout.addLayout(batch_row)
+        layout.addWidget(self.batch_status_label)
         layout.addWidget(self.list_widget, stretch=1)
 
     def set_items(self, items, preview_map):
@@ -169,6 +186,12 @@ class CatalogDockPanel(QWidget):
 
     def set_favorite_button(self, is_favorite: bool):
         self.favorite_button.setText("★" if is_favorite else "☆")
+
+    def set_batch_status(self, text: str, running: bool, paused: bool):
+        self.batch_status_label.setText(text)
+        self.batch_start_button.setEnabled(not running)
+        self.batch_stop_button.setEnabled(running)
+        self.batch_resume_button.setEnabled(paused)
 
     def set_item_icon(self, path: str, preview_path: str):
         norm = os.path.normcase(os.path.normpath(path))
