@@ -9,7 +9,7 @@ from viewer.services.catalog_db import set_asset_preview
 
 def get_preview_cache_dir():
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    cache_dir = os.path.join(root, ".cache", "previews")
+    cache_dir = os.path.join(root, ".cache", "previews", "model_view")
     os.makedirs(cache_dir, exist_ok=True)
     return cache_dir
 
@@ -23,9 +23,12 @@ def build_preview_path_for_model(model_path, size=128):
 
 
 def save_viewport_preview(model_path, image: QImage, db_path=None, size=128):
+    out_path = build_preview_path_for_model(model_path, size=size)
+    if os.path.isfile(out_path):
+        _save_preview_in_db(model_path, out_path, size, size, db_path=db_path)
+        return out_path
     if image is None or image.isNull():
         return None
-    out_path = build_preview_path_for_model(model_path, size=size)
     canvas = QImage(size, size, QImage.Format_ARGB32)
     canvas.fill(0xFF1F1F1F)
     scaled = image.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)

@@ -34,7 +34,7 @@ from viewer.services.catalog_db import (
     init_catalog_db,
     set_asset_favorite,
 )
-from viewer.services.preview_cache import save_viewport_preview
+from viewer.services.preview_cache import build_preview_path_for_model, get_preview_cache_dir, save_viewport_preview
 
 
 class MainWindow(QMainWindow):
@@ -73,7 +73,7 @@ class MainWindow(QMainWindow):
         self.catalog_dialog_scan_label = None
         self.catalog_dialog_events_list = None
         self._preview_icon_cache = {}
-        self._thumb_size = 64
+        self._thumb_size = 110
         self._current_categories = []
         self._pending_category_filter = "Все"
         self._model_item_by_path = {}
@@ -92,7 +92,7 @@ class MainWindow(QMainWindow):
 
         root_layout = QHBoxLayout(central_widget)
         browser_panel = QWidget(self)
-        browser_panel.setFixedWidth(320)
+        browser_panel.setFixedWidth(430)
         panel_layout = QVBoxLayout(browser_panel)
 
         choose_dir_button = QPushButton("Выбрать папку", self)
@@ -128,6 +128,7 @@ class MainWindow(QMainWindow):
         self.model_list = QTreeWidget(self)
         self.model_list.setHeaderHidden(True)
         self.model_list.setIconSize(QSize(self._thumb_size, self._thumb_size))
+        self.model_list.setIndentation(14)
         self.model_list.itemSelectionChanged.connect(self.on_selection_changed)
         panel_layout.addWidget(self.model_list, stretch=1)
 
@@ -406,11 +407,13 @@ class MainWindow(QMainWindow):
             db_path=self.catalog_db_path,
             kind="thumb",
         )
+        preview_root = os.path.normcase(os.path.normpath(get_preview_cache_dir()))
         self.model_list.clear()
         self._model_item_by_path = {}
         category_roots = {}
         for file_path in self.filtered_model_files:
-            display_name = os.path.relpath(file_path, self.current_directory)
+            rel_path = os.path.relpath(file_path, self.current_directory)
+            display_name = os.path.basename(file_path)
             norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
             category = self._top_category(file_path)
             if norm in self.favorite_paths:
@@ -424,7 +427,13 @@ class MainWindow(QMainWindow):
 
             item = QTreeWidgetItem([display_name])
             item.setData(0, Qt.UserRole, file_path)
+            item.setToolTip(0, rel_path)
+            item.setSizeHint(0, QSize(0, self._thumb_size + 10))
             preview_path = preview_map.get(norm)
+            if preview_path and os.path.isfile(preview_path):
+                preview_norm = os.path.normcase(os.path.normpath(os.path.abspath(preview_path)))
+                if not preview_norm.startswith(preview_root + os.sep):
+                    preview_path = ""
             if preview_path and os.path.isfile(preview_path):
                 self._preview_icon_cache[norm] = preview_path
                 icon = QIcon(QPixmap(preview_path))
@@ -946,6 +955,16 @@ class MainWindow(QMainWindow):
 
     def _capture_model_preview(self, file_path: str):
         if not file_path:
+            return
+        expected_path = build_preview_path_for_model(file_path, size=self._thumb_size)
+        if os.path.isfile(expected_path):
+            norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
+            self._preview_icon_cache[norm] = expected_path
+            icon = QIcon(QPixmap(expected_path))
+            if not icon.isNull():
+                item = self._model_item_by_path.get(norm)
+                if item is not None:
+                    item.setIcon(0, icon)
             return
         try:
             image = self.gl_widget.grabFramebuffer()
