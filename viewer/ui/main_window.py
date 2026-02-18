@@ -83,12 +83,17 @@ class MainWindow(QMainWindow):
         self._force_preview_for_path = ""
         self.catalog_dock = None
         self.catalog_panel = None
+        self.settings_dock = None
         self._syncing_filters_from_dock = False
         self.init_ui()
         self._register_shortcuts()
         self._restore_view_settings()
         self._settings_ready = True
         self._restore_last_directory()
+
+    def _set_status_text(self, text: str):
+        self.status_label.setText(text)
+        self.statusBar().showMessage(text)
 
     def init_ui(self):
         self.setWindowTitle("3D Viewer")
@@ -99,7 +104,7 @@ class MainWindow(QMainWindow):
 
         root_layout = QHBoxLayout(central_widget)
         browser_panel = QWidget(self)
-        browser_panel.setFixedWidth(430)
+        browser_panel.setFixedWidth(220)
         panel_layout = QVBoxLayout(browser_panel)
 
         choose_dir_button = QPushButton("Выбрать папку", self)
@@ -114,9 +119,20 @@ class MainWindow(QMainWindow):
         catalog_button.clicked.connect(self._open_catalog_dialog)
         panel_layout.addWidget(catalog_button)
 
-        open_catalog_panel_button = QPushButton("Панель превью", self)
+        open_catalog_panel_button = QPushButton("Превью", self)
         open_catalog_panel_button.clicked.connect(self._show_catalog_dock)
-        panel_layout.addWidget(open_catalog_panel_button)
+        open_catalog_panel_button.setToolTip("Показать/вернуть панель каталога")
+        self.open_catalog_panel_button = open_catalog_panel_button
+
+        open_settings_panel_button = QPushButton("Настройки", self)
+        open_settings_panel_button.clicked.connect(self._show_settings_dock)
+        open_settings_panel_button.setToolTip("Показать/вернуть панель настроек")
+        self.open_settings_panel_button = open_settings_panel_button
+
+        dock_buttons_layout = QHBoxLayout()
+        dock_buttons_layout.addWidget(open_catalog_panel_button)
+        dock_buttons_layout.addWidget(open_settings_panel_button)
+        panel_layout.addLayout(dock_buttons_layout)
 
         self.directory_label = QLabel("Папка не выбрана")
         self.directory_label.setWordWrap(True)
@@ -165,7 +181,7 @@ class MainWindow(QMainWindow):
         choose_dir_button.hide()
         reload_button.hide()
         catalog_button.hide()
-        open_catalog_panel_button.hide()
+        # Keep reopen buttons visible when user closes dock panels.
         self.search_input.hide()
         self.category_combo.hide()
         self.only_favorites_checkbox.hide()
@@ -173,6 +189,9 @@ class MainWindow(QMainWindow):
         self.prev_button.hide()
         self.next_button.hide()
         self.favorite_toggle_button.hide()
+        self.directory_label.hide()
+        self.status_label.hide()
+        panel_layout.addStretch(1)
 
         controls_tabs = QTabWidget(self)
 
@@ -293,11 +312,12 @@ class MainWindow(QMainWindow):
         light_layout.addRow(reset_light_settings_button)
 
         controls_tabs.addTab(light_group, "Свет")
-        panel_layout.addWidget(controls_tabs)
+        self.controls_tabs = controls_tabs
 
         root_layout.addWidget(browser_panel)
         root_layout.addWidget(self.gl_widget, stretch=1)
         self._init_catalog_dock()
+        self._init_settings_dock()
 
         self._on_alpha_cutoff_changed(self.alpha_cutoff_slider.value())
         self._on_rotate_speed_changed(self.rotate_speed_slider.value())
@@ -307,6 +327,7 @@ class MainWindow(QMainWindow):
         self._on_fill_light_changed(self.fill_light_slider.value())
         self._on_background_brightness_changed(self.bg_brightness_slider.value())
         self._on_shadows_toggled(Qt.Unchecked)
+        self.statusBar().showMessage("Готово")
 
     def _init_catalog_dock(self):
         dock = QDockWidget("Каталог (превью)", self)
@@ -334,6 +355,18 @@ class MainWindow(QMainWindow):
         dock.resize(620, 760)
         self.catalog_dock = dock
         self.catalog_panel = panel
+
+    def _init_settings_dock(self):
+        dock = QDockWidget("Настройки (материал/камера/свет)", self)
+        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        dock.setFeatures(
+            QDockWidget.DockWidgetMovable
+            | QDockWidget.DockWidgetFloatable
+            | QDockWidget.DockWidgetClosable
+        )
+        dock.setWidget(self.controls_tabs)
+        self.addDockWidget(Qt.RightDockWidgetArea, dock)
+        self.settings_dock = dock
 
     def _restore_view_settings(self):
         rotate_speed = self.settings.value("view/rotate_speed_slider", 100, type=int)
@@ -386,6 +419,7 @@ class MainWindow(QMainWindow):
         self.current_directory = directory
         self.settings.setValue("last_directory", directory)
         self.directory_label.setText(directory)
+        self.open_catalog_panel_button.setToolTip(f"Каталог: {directory}")
         self.model_files = self._scan_models(directory)
         self._populate_category_filter()
         self._restore_category_filter(self._pending_category_filter)
@@ -394,19 +428,19 @@ class MainWindow(QMainWindow):
         self._start_index_scan(directory)
 
         if not self.filtered_model_files:
-            self.status_label.setText("В выбранной папке нет поддерживаемых моделей.")
+            self._set_status_text("В выбранной папке нет поддерживаемых моделей.")
             return
 
         if auto_select_first:
             self._select_model_by_index(0)
         else:
             self.model_list.clearSelection()
-            self.status_label.setText(
+            self._set_status_text(
                 f"Найдено моделей: {len(self.filtered_model_files)}. Автозагрузка отключена, выбери модель вручную."
             )
             return
 
-        self.status_label.setText(f"Найдено моделей: {len(self.filtered_model_files)}")
+        self._set_status_text(f"Найдено моделей: {len(self.filtered_model_files)}")
 
     def _scan_models(self, directory):
         files = []
@@ -715,7 +749,7 @@ class MainWindow(QMainWindow):
         preview = "unlit" if self.gl_widget.unlit_texture_preview else "lit"
         projection = "ortho" if self.gl_widget.projection_mode == "orthographic" else "persp"
         shadow_state = self.gl_widget.shadow_status_message
-        self.status_label.setText(
+        self._set_status_text(
             f"Открыт: {os.path.basename(file_path)} ({row + 1}/{len(self.filtered_model_files)}) | "
             f"UV: {uv_count} | Текстур-кандидатов: {tex_count} | Текстура: {tex_file} | {preview} | {projection} | shadows:{shadow_state}"
         )
@@ -837,7 +871,7 @@ class MainWindow(QMainWindow):
         self.model_list.setEnabled(False)
         self.prev_button.setEnabled(False)
         self.next_button.setEnabled(False)
-        self.status_label.setText(f"Загрузка: {os.path.basename(file_path)} ...")
+        self._set_status_text(f"Загрузка: {os.path.basename(file_path)} ...")
 
         thread = QThread(self)
         worker = ModelLoadWorker(request_id, file_path, fast_mode=(self.render_mode == "fast"))
@@ -865,7 +899,7 @@ class MainWindow(QMainWindow):
         self.next_button.setEnabled(True)
 
         if not loaded:
-            self.status_label.setText(f"Ошибка: {self.gl_widget.last_error}")
+            self._set_status_text(f"Ошибка: {self.gl_widget.last_error}")
             return
 
         self.current_file_path = file_path
@@ -888,7 +922,7 @@ class MainWindow(QMainWindow):
         self.model_list.setEnabled(True)
         self.prev_button.setEnabled(True)
         self.next_button.setEnabled(True)
-        self.status_label.setText(f"Ошибка загрузки: {error_text}")
+        self._set_status_text(f"Ошибка загрузки: {error_text}")
 
     def _start_index_scan(self, directory: str):
         if not directory:
@@ -967,7 +1001,7 @@ class MainWindow(QMainWindow):
 
     def _scan_catalog_now(self):
         if not self.current_directory:
-            self.status_label.setText("Сначала выбери папку для сканирования.")
+            self._set_status_text("Сначала выбери папку для сканирования.")
             return
         self._start_index_scan(self.current_directory)
 
@@ -1035,7 +1069,7 @@ class MainWindow(QMainWindow):
 
         if not self.filtered_model_files:
             self.favorite_toggle_button.setText("☆")
-            self.status_label.setText("Нет моделей по текущему фильтру.")
+            self._set_status_text("Нет моделей по текущему фильтру.")
             self._append_index_status()
         else:
             if self._current_model_index() < 0:
@@ -1075,9 +1109,9 @@ class MainWindow(QMainWindow):
             base = base.split(" | Индекс:")[0]
         summary = self._last_index_summary
         if "error" in summary:
-            self.status_label.setText(f"{base} | Индекс: ошибка ({summary['error']})")
+            self._set_status_text(f"{base} | Индекс: ошибка ({summary['error']})")
             return
-        self.status_label.setText(
+        self._set_status_text(
             f"{base} | Индекс: +{summary.get('new', 0)} ~{summary.get('updated', 0)} -{summary.get('removed', 0)}"
         )
 
@@ -1166,6 +1200,12 @@ class MainWindow(QMainWindow):
             return
         self.catalog_dock.show()
         self.catalog_dock.raise_()
+
+    def _show_settings_dock(self):
+        if self.settings_dock is None:
+            return
+        self.settings_dock.show()
+        self.settings_dock.raise_()
 
     def _build_catalog_dialog(self):
         dialog = QDialog(self)
