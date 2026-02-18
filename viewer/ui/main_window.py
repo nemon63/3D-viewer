@@ -3,9 +3,11 @@ import os
 from PyQt5.QtCore import QSettings, QSize, Qt, QThread, QTimer
 from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
+    QDockWidget,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -26,6 +28,7 @@ from PyQt5.QtWidgets import (
 )
 
 from viewer.ui.opengl_widget import OpenGLWidget
+from viewer.ui.catalog_dock import CatalogDockPanel
 from viewer.ui.workers import CatalogIndexWorker, ModelLoadWorker
 from viewer.services.catalog_db import (
     get_favorite_paths,
@@ -77,6 +80,10 @@ class MainWindow(QMainWindow):
         self._current_categories = []
         self._pending_category_filter = "Все"
         self._model_item_by_path = {}
+        self._force_preview_for_path = ""
+        self.catalog_dock = None
+        self.catalog_panel = None
+        self._syncing_filters_from_dock = False
         self.init_ui()
         self._register_shortcuts()
         self._restore_view_settings()
@@ -106,6 +113,10 @@ class MainWindow(QMainWindow):
         catalog_button = QPushButton("Каталог...", self)
         catalog_button.clicked.connect(self._open_catalog_dialog)
         panel_layout.addWidget(catalog_button)
+
+        open_catalog_panel_button = QPushButton("Панель превью", self)
+        open_catalog_panel_button.clicked.connect(self._show_catalog_dock)
+        panel_layout.addWidget(open_catalog_panel_button)
 
         self.directory_label = QLabel("Папка не выбрана")
         self.directory_label.setWordWrap(True)
@@ -149,6 +160,19 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Выбери папку с моделями")
         self.status_label.setWordWrap(True)
         panel_layout.addWidget(self.status_label)
+
+        # Browser controls are now in floating catalog dock.
+        choose_dir_button.hide()
+        reload_button.hide()
+        catalog_button.hide()
+        open_catalog_panel_button.hide()
+        self.search_input.hide()
+        self.category_combo.hide()
+        self.only_favorites_checkbox.hide()
+        self.model_list.hide()
+        self.prev_button.hide()
+        self.next_button.hide()
+        self.favorite_toggle_button.hide()
 
         controls_tabs = QTabWidget(self)
 
@@ -273,6 +297,7 @@ class MainWindow(QMainWindow):
 
         root_layout.addWidget(browser_panel)
         root_layout.addWidget(self.gl_widget, stretch=1)
+        self._init_catalog_dock()
 
         self._on_alpha_cutoff_changed(self.alpha_cutoff_slider.value())
         self._on_rotate_speed_changed(self.rotate_speed_slider.value())
@@ -282,6 +307,33 @@ class MainWindow(QMainWindow):
         self._on_fill_light_changed(self.fill_light_slider.value())
         self._on_background_brightness_changed(self.bg_brightness_slider.value())
         self._on_shadows_toggled(Qt.Unchecked)
+
+    def _init_catalog_dock(self):
+        dock = QDockWidget("Каталог (превью)", self)
+        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        dock.setFeatures(
+            QDockWidget.DockWidgetMovable
+            | QDockWidget.DockWidgetFloatable
+            | QDockWidget.DockWidgetClosable
+        )
+        panel = CatalogDockPanel(dock)
+        panel.openRequested.connect(self._open_model_by_path)
+        panel.regeneratePreviewRequested.connect(self._regenerate_preview_for_path)
+        panel.openFolderRequested.connect(self._open_folder_for_model_path)
+        panel.copyPathRequested.connect(self._copy_model_path)
+        panel.chooseDirectoryRequested.connect(self.choose_directory)
+        panel.reloadRequested.connect(self.reload_directory)
+        panel.previousRequested.connect(self.show_previous_model)
+        panel.nextRequested.connect(self.show_next_model)
+        panel.toggleFavoriteRequested.connect(self._toggle_current_favorite)
+        panel.filtersChanged.connect(self._on_dock_filters_changed)
+        panel.thumbSizeChanged.connect(self._on_catalog_thumb_size_changed)
+        dock.setWidget(panel)
+        self.addDockWidget(Qt.RightDockWidgetArea, dock)
+        dock.setFloating(True)
+        dock.resize(620, 760)
+        self.catalog_dock = dock
+        self.catalog_panel = panel
 
     def _restore_view_settings(self):
         rotate_speed = self.settings.value("view/rotate_speed_slider", 100, type=int)
@@ -444,6 +496,31 @@ class MainWindow(QMainWindow):
 
         for i in range(self.model_list.topLevelItemCount()):
             self.model_list.topLevelItem(i).setExpanded(True)
+        self._refresh_catalog_dock_items()
+        self._sync_filters_to_dock()
+
+    def _refresh_catalog_dock_items(self):
+        if self.catalog_panel is None:
+            return
+        preview_map_raw = get_preview_paths_for_assets(
+            self.filtered_model_files,
+            db_path=self.catalog_db_path,
+            kind="thumb",
+        )
+        preview_root = os.path.normcase(os.path.normpath(get_preview_cache_dir()))
+        preview_map = {}
+        items = []
+        for file_path in self.filtered_model_files:
+            norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
+            rel_display = os.path.relpath(file_path, self.current_directory) if self.current_directory else file_path
+            is_favorite = norm in self.favorite_paths
+            items.append((file_path, rel_display, is_favorite))
+            preview_path = preview_map_raw.get(norm)
+            if preview_path and os.path.isfile(preview_path):
+                pnorm = os.path.normcase(os.path.normpath(os.path.abspath(preview_path)))
+                if pnorm.startswith(preview_root + os.sep):
+                    preview_map[file_path] = preview_path
+        self.catalog_panel.set_items(items, preview_map)
 
     def _load_model_at_row(self, row):
         if row < 0 or row >= len(self.filtered_model_files):
@@ -454,10 +531,14 @@ class MainWindow(QMainWindow):
         self._start_async_model_load(row, file_path)
 
     def _current_selected_path(self):
+        if self.catalog_panel is not None:
+            dock_path = self.catalog_panel.current_path()
+            if dock_path:
+                return dock_path
         item = self.model_list.currentItem()
         if item is None:
-            return ""
-        return item.data(0, Qt.UserRole) or ""
+            return self.current_file_path or ""
+        return item.data(0, Qt.UserRole) or self.current_file_path or ""
 
     def _current_model_index(self):
         path = self._current_selected_path()
@@ -478,6 +559,22 @@ class MainWindow(QMainWindow):
             return
         self.model_list.setCurrentItem(item)
         self.model_list.scrollToItem(item)
+        if self.catalog_panel is not None:
+            self.catalog_panel.set_current_path(path)
+
+    def _open_model_by_path(self, path: str):
+        if not path:
+            return
+        try:
+            idx = self.filtered_model_files.index(path)
+        except ValueError:
+            return
+        current_norm = os.path.normcase(os.path.normpath(os.path.abspath(self.current_file_path))) if self.current_file_path else ""
+        target_norm = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+        if current_norm == target_norm:
+            self._load_model_at_row(idx)
+            return
+        self._select_model_by_index(idx)
 
     def on_selection_changed(self):
         row = self._current_model_index()
@@ -776,7 +873,10 @@ class MainWindow(QMainWindow):
         self._update_status(row)
         self.setWindowTitle(f"3D Viewer - {os.path.basename(file_path)}")
         if file_path:
-            QTimer.singleShot(180, lambda p=file_path: self._capture_model_preview(p))
+            force = bool(self._force_preview_for_path) and os.path.normcase(os.path.normpath(self._force_preview_for_path)) == os.path.normcase(os.path.normpath(file_path))
+            if force:
+                self._force_preview_for_path = ""
+            QTimer.singleShot(180, lambda p=file_path, f=force: self._capture_model_preview(p, force=f))
         if file_path.lower().endswith(".fbx"):
             print("[FBX DEBUG]", self.gl_widget.last_debug_info or {})
             print("[FBX DEBUG] selected_texture:", self.gl_widget.last_texture_path or "<none>")
@@ -871,11 +971,35 @@ class MainWindow(QMainWindow):
         self._start_index_scan(self.current_directory)
 
     def _on_filters_changed(self):
+        if self._syncing_filters_from_dock:
+            return
         if self._settings_ready:
             self.settings.setValue("view/search_text", self.search_input.text())
             self.settings.setValue("view/only_favorites", self.only_favorites_checkbox.isChecked())
             self.settings.setValue("view/category_filter", self.category_combo.currentText())
         self._apply_model_filters(keep_selection=True)
+        self._sync_filters_to_dock()
+
+    def _on_dock_filters_changed(self, search_text: str, category_text: str, only_fav: bool):
+        self._syncing_filters_from_dock = True
+        try:
+            self.search_input.setText(search_text or "")
+            idx = self.category_combo.findText(category_text or "Все")
+            self.category_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            self.only_favorites_checkbox.setChecked(bool(only_fav))
+        finally:
+            self._syncing_filters_from_dock = False
+        self._on_filters_changed()
+
+    def _sync_filters_to_dock(self):
+        if self.catalog_panel is None:
+            return
+        self.catalog_panel.set_filter_state(
+            search_text=self.search_input.text(),
+            category_options=self._current_categories,
+            selected_category=self.category_combo.currentText(),
+            only_fav=self.only_favorites_checkbox.isChecked(),
+        )
 
     def _apply_model_filters(self, keep_selection=True):
         prev_path = ""
@@ -937,7 +1061,10 @@ class MainWindow(QMainWindow):
     def _update_favorite_button_for_current(self):
         path = self._current_selected_path()
         norm = os.path.normcase(os.path.normpath(os.path.abspath(path))) if path else ""
-        self.favorite_toggle_button.setText("★" if norm in self.favorite_paths else "☆")
+        is_fav = norm in self.favorite_paths
+        self.favorite_toggle_button.setText("★" if is_fav else "☆")
+        if self.catalog_panel is not None:
+            self.catalog_panel.set_favorite_button(is_fav)
 
     def _append_index_status(self):
         if not self._last_index_summary:
@@ -953,11 +1080,11 @@ class MainWindow(QMainWindow):
             f"{base} | Индекс: +{summary.get('new', 0)} ~{summary.get('updated', 0)} -{summary.get('removed', 0)}"
         )
 
-    def _capture_model_preview(self, file_path: str):
+    def _capture_model_preview(self, file_path: str, force: bool = False):
         if not file_path:
             return
         expected_path = build_preview_path_for_model(file_path, size=self._thumb_size)
-        if os.path.isfile(expected_path):
+        if (not force) and os.path.isfile(expected_path):
             norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
             self._preview_icon_cache[norm] = expected_path
             icon = QIcon(QPixmap(expected_path))
@@ -965,6 +1092,8 @@ class MainWindow(QMainWindow):
                 item = self._model_item_by_path.get(norm)
                 if item is not None:
                     item.setIcon(0, icon)
+                if self.catalog_panel is not None:
+                    self.catalog_panel.set_item_icon(file_path, expected_path)
             return
         try:
             image = self.gl_widget.grabFramebuffer()
@@ -986,6 +1115,54 @@ class MainWindow(QMainWindow):
         item = self._model_item_by_path.get(norm)
         if item is not None:
             item.setIcon(0, icon)
+        if self.catalog_panel is not None:
+            self.catalog_panel.set_item_icon(file_path, preview_path)
+
+    def _regenerate_preview_for_path(self, file_path: str):
+        if not file_path:
+            return
+        preview_path = build_preview_path_for_model(file_path, size=self._thumb_size)
+        try:
+            if os.path.isfile(preview_path):
+                os.remove(preview_path)
+        except OSError:
+            pass
+        norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
+        self._preview_icon_cache.pop(norm, None)
+        item = self._model_item_by_path.get(norm)
+        if item is not None:
+            item.setIcon(0, QIcon())
+        if self.catalog_panel is not None:
+            self.catalog_panel.clear_item_icon(file_path)
+        self._force_preview_for_path = file_path
+        self._open_model_by_path(file_path)
+
+    def _open_folder_for_model_path(self, file_path: str):
+        directory = os.path.dirname(file_path)
+        if not directory or not os.path.isdir(directory):
+            return
+        try:
+            os.startfile(directory)
+        except Exception:
+            pass
+
+    def _copy_model_path(self, file_path: str):
+        if not file_path:
+            return
+        QApplication.clipboard().setText(file_path)
+
+    def _on_catalog_thumb_size_changed(self, size: int):
+        self._thumb_size = int(size)
+        self.model_list.setIconSize(QSize(self._thumb_size, self._thumb_size))
+        for item in self._model_item_by_path.values():
+            item.setSizeHint(0, QSize(0, self._thumb_size + 10))
+        self._refresh_catalog_dock_items()
+
+    def _show_catalog_dock(self):
+        if self.catalog_dock is None:
+            return
+        self.catalog_dock.show()
+        self.catalog_dock.raise_()
 
     def _build_catalog_dialog(self):
         dialog = QDialog(self)
