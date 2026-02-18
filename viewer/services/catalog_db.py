@@ -167,6 +167,92 @@ def get_recent_events(limit=50, db_path=None, root=None):
     return out
 
 
+def get_favorite_paths(root=None, db_path=None):
+    db_path = db_path or get_default_db_path()
+    if not os.path.isfile(db_path):
+        return set()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        params = []
+        where = "WHERE a.favorite = 1"
+        if root:
+            root_norm = os.path.normcase(os.path.normpath(os.path.abspath(root)))
+            where += " AND (a.source_path = ? OR a.source_path LIKE ?)"
+            params.extend([root_norm, root_norm + os.sep + "%"])
+        rows = conn.execute(f"SELECT a.source_path FROM assets a {where}", params).fetchall()
+    finally:
+        conn.close()
+    return {os.path.normcase(os.path.normpath(os.path.abspath(r["source_path"]))) for r in rows}
+
+
+def set_asset_favorite(source_path, favorite, db_path=None):
+    db_path = init_catalog_db(db_path)
+    source_path = os.path.abspath(source_path)
+    norm = os.path.normcase(os.path.normpath(source_path))
+    now = _utc_now_iso()
+    try:
+        st = os.stat(source_path)
+        size_bytes = int(st.st_size)
+        mtime = float(st.st_mtime)
+    except OSError:
+        size_bytes = None
+        mtime = None
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA foreign_keys=ON;")
+        row = conn.execute("SELECT id FROM assets WHERE source_path=? LIMIT 1", (source_path,)).fetchone()
+        if row is None:
+            cur = conn.execute(
+                """
+                INSERT INTO assets(name, source_path, favorite, created_at, updated_at, last_seen_at)
+                VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                (os.path.basename(source_path), source_path, int(bool(favorite)), now, now, now),
+            )
+            asset_id = int(cur.lastrowid)
+        else:
+            asset_id = int(row["id"])
+            conn.execute(
+                "UPDATE assets SET favorite=?, updated_at=?, last_seen_at=? WHERE id=?",
+                (int(bool(favorite)), now, now, asset_id),
+            )
+
+        if size_bytes is not None and mtime is not None:
+            g = conn.execute(
+                "SELECT id FROM geometries WHERE asset_id=? AND file_path=? LIMIT 1",
+                (asset_id, source_path),
+            ).fetchone()
+            ext = os.path.splitext(source_path)[1].lower().lstrip(".")
+            if g is None:
+                conn.execute(
+                    """
+                    INSERT INTO geometries(asset_id, file_path, format, size_bytes, mtime, hash_fast, created_at)
+                    VALUES(?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (asset_id, source_path, ext, size_bytes, mtime, f"{size_bytes}:{mtime:.6f}", now),
+                )
+            else:
+                conn.execute(
+                    "UPDATE geometries SET format=?, size_bytes=?, mtime=?, hash_fast=? WHERE id=?",
+                    (ext, size_bytes, mtime, f"{size_bytes}:{mtime:.6f}", int(g["id"])),
+                )
+
+        _insert_event(
+            conn,
+            asset_id,
+            "favorite_set",
+            {"path": source_path, "favorite": bool(favorite), "norm": norm},
+            now,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _load_existing_assets(conn, root):
     like_root = root + os.sep + "%"
     rows = conn.execute(

@@ -4,11 +4,13 @@ from PyQt5.QtCore import QObject, QSettings, Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -23,7 +25,13 @@ from PyQt5.QtWidgets import (
 
 from viewer.ui.opengl_widget import OpenGLWidget
 from viewer.loaders.model_loader import load_model_payload
-from viewer.services.catalog_db import get_recent_events, init_catalog_db, scan_and_index_directory
+from viewer.services.catalog_db import (
+    get_favorite_paths,
+    get_recent_events,
+    init_catalog_db,
+    scan_and_index_directory,
+    set_asset_favorite,
+)
 
 
 class ModelLoadWorker(QObject):
@@ -77,6 +85,8 @@ class MainWindow(QMainWindow):
         self._settings_ready = False
         self.current_directory = ""
         self.model_files = []
+        self.filtered_model_files = []
+        self.favorite_paths = set()
         self.current_file_path = ""
         self.model_extensions = (".obj", ".fbx", ".stl", ".ply", ".glb", ".gltf", ".off", ".dae")
         self.material_channels = [
@@ -94,6 +104,11 @@ class MainWindow(QMainWindow):
         self._index_thread = None
         self._index_worker = None
         self._last_index_summary = None
+        self._catalog_scan_text = "Индекс: нет данных"
+        self.catalog_dialog = None
+        self.catalog_dialog_db_label = None
+        self.catalog_dialog_scan_label = None
+        self.catalog_dialog_events_list = None
         self.init_ui()
         self._register_shortcuts()
         self._restore_view_settings()
@@ -120,9 +135,9 @@ class MainWindow(QMainWindow):
         reload_button.clicked.connect(self.reload_directory)
         panel_layout.addWidget(reload_button)
 
-        scan_catalog_button = QPushButton("Сканировать каталог", self)
-        scan_catalog_button.clicked.connect(self._scan_catalog_now)
-        panel_layout.addWidget(scan_catalog_button)
+        catalog_button = QPushButton("Каталог...", self)
+        catalog_button.clicked.connect(self._open_catalog_dialog)
+        panel_layout.addWidget(catalog_button)
 
         self.directory_label = QLabel("Папка не выбрана")
         self.directory_label.setWordWrap(True)
@@ -132,6 +147,17 @@ class MainWindow(QMainWindow):
         self.model_list.itemSelectionChanged.connect(self.on_selection_changed)
         panel_layout.addWidget(self.model_list, stretch=1)
 
+        filter_layout = QHBoxLayout()
+        self.search_input = QLineEdit(self)
+        self.search_input.setPlaceholderText("Поиск по имени или пути...")
+        self.search_input.textChanged.connect(self._on_filters_changed)
+        filter_layout.addWidget(self.search_input, stretch=1)
+        self.only_favorites_checkbox = QCheckBox("★", self)
+        self.only_favorites_checkbox.setToolTip("Показывать только избранные")
+        self.only_favorites_checkbox.stateChanged.connect(self._on_filters_changed)
+        filter_layout.addWidget(self.only_favorites_checkbox)
+        panel_layout.addLayout(filter_layout)
+
         nav_layout = QHBoxLayout()
         self.prev_button = QPushButton("Предыдущая", self)
         self.prev_button.clicked.connect(self.show_previous_model)
@@ -139,24 +165,16 @@ class MainWindow(QMainWindow):
         self.next_button = QPushButton("Следующая", self)
         self.next_button.clicked.connect(self.show_next_model)
         nav_layout.addWidget(self.next_button)
+        self.favorite_toggle_button = QPushButton("☆", self)
+        self.favorite_toggle_button.setToolTip("Добавить/убрать из избранного")
+        self.favorite_toggle_button.clicked.connect(self._toggle_current_favorite)
+        self.favorite_toggle_button.setFixedWidth(36)
+        nav_layout.addWidget(self.favorite_toggle_button)
         panel_layout.addLayout(nav_layout)
 
         self.status_label = QLabel("Выбери папку с моделями")
         self.status_label.setWordWrap(True)
         panel_layout.addWidget(self.status_label)
-
-        catalog_group = QGroupBox("Каталог", self)
-        catalog_layout = QVBoxLayout(catalog_group)
-        self.catalog_db_label = QLabel(f"DB: {self.catalog_db_path}")
-        self.catalog_db_label.setWordWrap(True)
-        catalog_layout.addWidget(self.catalog_db_label)
-        self.catalog_scan_label = QLabel("Индекс: нет данных")
-        self.catalog_scan_label.setWordWrap(True)
-        catalog_layout.addWidget(self.catalog_scan_label)
-        self.catalog_events_list = QListWidget(self)
-        self.catalog_events_list.setMaximumHeight(120)
-        catalog_layout.addWidget(self.catalog_events_list)
-        panel_layout.addWidget(catalog_group)
 
         controls_tabs = QTabWidget(self)
 
@@ -301,6 +319,8 @@ class MainWindow(QMainWindow):
         projection = self.settings.value("view/projection_mode", "perspective", type=str)
         render_mode = self.settings.value("view/render_mode", "quality", type=str)
         shadows = self.settings.value("view/shadows_enabled", False, type=bool)
+        search_text = self.settings.value("view/search_text", "", type=str)
+        only_fav = self.settings.value("view/only_favorites", False, type=bool)
 
         self.rotate_speed_slider.setValue(max(self.rotate_speed_slider.minimum(), min(self.rotate_speed_slider.maximum(), rotate_speed)))
         self.zoom_speed_slider.setValue(max(self.zoom_speed_slider.minimum(), min(self.zoom_speed_slider.maximum(), zoom_speed)))
@@ -316,6 +336,8 @@ class MainWindow(QMainWindow):
         if mode_idx >= 0:
             self.render_mode_combo.setCurrentIndex(mode_idx)
         self.shadows_checkbox.setChecked(bool(shadows))
+        self.search_input.setText(search_text)
+        self.only_favorites_checkbox.setChecked(bool(only_fav))
 
     def _restore_last_directory(self):
         last_directory = self.settings.value("last_directory", "", type=str)
@@ -337,10 +359,11 @@ class MainWindow(QMainWindow):
         self.settings.setValue("last_directory", directory)
         self.directory_label.setText(directory)
         self.model_files = self._scan_models(directory)
-        self._fill_model_list()
+        self._refresh_favorites_from_db()
+        self._apply_model_filters(keep_selection=False)
         self._start_index_scan(directory)
 
-        if not self.model_files:
+        if not self.filtered_model_files:
             self.status_label.setText("В выбранной папке нет поддерживаемых моделей.")
             return
 
@@ -349,11 +372,11 @@ class MainWindow(QMainWindow):
         else:
             self.model_list.clearSelection()
             self.status_label.setText(
-                f"Найдено моделей: {len(self.model_files)}. Автозагрузка отключена, выбери модель вручную."
+                f"Найдено моделей: {len(self.filtered_model_files)}. Автозагрузка отключена, выбери модель вручную."
             )
             return
 
-        self.status_label.setText(f"Найдено моделей: {len(self.model_files)}")
+        self.status_label.setText(f"Найдено моделей: {len(self.filtered_model_files)}")
 
     def _scan_models(self, directory):
         files = []
@@ -367,39 +390,43 @@ class MainWindow(QMainWindow):
 
     def _fill_model_list(self):
         self.model_list.clear()
-        for file_path in self.model_files:
+        for file_path in self.filtered_model_files:
             display_name = os.path.relpath(file_path, self.current_directory)
+            norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
+            if norm in self.favorite_paths:
+                display_name = f"★ {display_name}"
             item = QListWidgetItem(display_name)
             item.setData(Qt.UserRole, file_path)
             self.model_list.addItem(item)
 
     def _load_model_at_row(self, row):
-        if row < 0 or row >= len(self.model_files):
+        if row < 0 or row >= len(self.filtered_model_files):
             return
-        file_path = self.model_files[row]
+        file_path = self.filtered_model_files[row]
         if not self._confirm_heavy_model_load(file_path):
             return
         self._start_async_model_load(row, file_path)
 
     def on_selection_changed(self):
         row = self.model_list.currentRow()
+        self._update_favorite_button_for_current()
         self._load_model_at_row(row)
 
     def show_previous_model(self):
-        if not self.model_files:
+        if not self.filtered_model_files:
             return
         row = self.model_list.currentRow()
         if row <= 0:
-            row = len(self.model_files) - 1
+            row = len(self.filtered_model_files) - 1
         else:
             row -= 1
         self.model_list.setCurrentRow(row)
 
     def show_next_model(self):
-        if not self.model_files:
+        if not self.filtered_model_files:
             return
         row = self.model_list.currentRow()
-        if row < 0 or row >= len(self.model_files) - 1:
+        if row < 0 or row >= len(self.filtered_model_files) - 1:
             row = 0
         else:
             row += 1
@@ -508,9 +535,9 @@ class MainWindow(QMainWindow):
         self._update_status(self.model_list.currentRow())
 
     def _update_status(self, row):
-        if row < 0 or row >= len(self.model_files):
+        if row < 0 or row >= len(self.filtered_model_files):
             return
-        file_path = self.model_files[row]
+        file_path = self.filtered_model_files[row]
         debug = self.gl_widget.last_debug_info or {}
         uv_count = debug.get("uv_count", 0)
         tex_count = debug.get("texture_candidates_count", 0)
@@ -519,7 +546,7 @@ class MainWindow(QMainWindow):
         projection = "ortho" if self.gl_widget.projection_mode == "orthographic" else "persp"
         shadow_state = self.gl_widget.shadow_status_message
         self.status_label.setText(
-            f"Открыт: {os.path.basename(file_path)} ({row + 1}/{len(self.model_files)}) | "
+            f"Открыт: {os.path.basename(file_path)} ({row + 1}/{len(self.filtered_model_files)}) | "
             f"UV: {uv_count} | Текстур-кандидатов: {tex_count} | Текстура: {tex_file} | {preview} | {projection} | shadows:{shadow_state}"
         )
         self._append_index_status()
@@ -543,7 +570,7 @@ class MainWindow(QMainWindow):
         if self._settings_ready:
             self.settings.setValue("view/render_mode", mode)
             row = self.model_list.currentRow()
-            if 0 <= row < len(self.model_files):
+            if 0 <= row < len(self.filtered_model_files):
                 self._load_model_at_row(row)
 
     def _on_rotate_speed_changed(self, value: int):
@@ -661,7 +688,7 @@ class MainWindow(QMainWindow):
         if request_id != self._load_request_id:
             return
         row = self._active_load_row
-        file_path = self.model_files[row] if 0 <= row < len(self.model_files) else ""
+        file_path = self.filtered_model_files[row] if 0 <= row < len(self.filtered_model_files) else ""
         loaded = self.gl_widget.apply_payload(payload)
         self.model_list.setEnabled(True)
         self.prev_button.setEnabled(True)
@@ -672,6 +699,7 @@ class MainWindow(QMainWindow):
             return
 
         self.current_file_path = file_path
+        self._update_favorite_button_for_current()
         self._populate_material_controls(self.gl_widget.last_texture_sets)
         self._update_status(row)
         self.setWindowTitle(f"3D Viewer - {os.path.basename(file_path)}")
@@ -691,7 +719,8 @@ class MainWindow(QMainWindow):
         if not directory:
             return
         self._last_index_summary = None
-        self.catalog_scan_label.setText("Индекс: сканирование...")
+        self._catalog_scan_text = "Индекс: сканирование..."
+        self._sync_catalog_dialog_state()
         thread = QThread(self)
         worker = CatalogIndexWorker(directory, self.model_extensions, self.catalog_db_path)
         worker.moveToThread(thread)
@@ -708,23 +737,27 @@ class MainWindow(QMainWindow):
 
     def _on_index_scan_finished(self, summary: dict):
         self._last_index_summary = summary
-        self.catalog_scan_label.setText(
+        self._catalog_scan_text = (
             f"Индекс: +{summary.get('new', 0)} ~{summary.get('updated', 0)} -{summary.get('removed', 0)} | {summary.get('duration_sec', 0)}s"
         )
         self._refresh_catalog_events()
+        self._sync_catalog_dialog_state()
         self._append_index_status()
 
     def _on_index_scan_failed(self, error_text: str):
         self._last_index_summary = {"error": error_text}
-        self.catalog_scan_label.setText(f"Индекс: ошибка ({error_text})")
+        self._catalog_scan_text = f"Индекс: ошибка ({error_text})"
         self._refresh_catalog_events()
+        self._sync_catalog_dialog_state()
         self._append_index_status()
 
     def _refresh_catalog_events(self):
-        self.catalog_events_list.clear()
+        if self.catalog_dialog_events_list is None:
+            return
+        self.catalog_dialog_events_list.clear()
         events = get_recent_events(limit=120, db_path=self.catalog_db_path, root=self.current_directory or None)
         if not events:
-            self.catalog_events_list.addItem("Событий нет")
+            self.catalog_dialog_events_list.addItem("Событий нет")
             return
         for ev in events[:40]:
             source_path = ev.get("source_path", "") or ""
@@ -742,7 +775,7 @@ class MainWindow(QMainWindow):
                 upd_n = payload.get("updated", 0)
                 rem_n = payload.get("removed", 0)
                 created = (ev.get("created_at", "") or "").replace("T", " ")[:19]
-                self.catalog_events_list.addItem(
+                self.catalog_dialog_events_list.addItem(
                     f"{created} | scan_completed | seen={seen} +{new_n} ~{upd_n} -{rem_n} | {root}"
                 )
                 continue
@@ -755,13 +788,85 @@ class MainWindow(QMainWindow):
             else:
                 path = source_path or "<unknown>"
             created = (ev.get("created_at", "") or "").replace("T", " ")[:19]
-            self.catalog_events_list.addItem(f"{created} | {etype} | {path}")
+            self.catalog_dialog_events_list.addItem(f"{created} | {etype} | {path}")
 
     def _scan_catalog_now(self):
         if not self.current_directory:
             self.status_label.setText("Сначала выбери папку для сканирования.")
             return
         self._start_index_scan(self.current_directory)
+
+    def _on_filters_changed(self):
+        if self._settings_ready:
+            self.settings.setValue("view/search_text", self.search_input.text())
+            self.settings.setValue("view/only_favorites", self.only_favorites_checkbox.isChecked())
+        self._apply_model_filters(keep_selection=True)
+
+    def _apply_model_filters(self, keep_selection=True):
+        prev_path = ""
+        current_item = self.model_list.currentItem()
+        if keep_selection and current_item is not None:
+            prev_path = current_item.data(Qt.UserRole) or ""
+
+        needle = (self.search_input.text() or "").strip().lower()
+        only_fav = self.only_favorites_checkbox.isChecked()
+        filtered = []
+        for p in self.model_files:
+            rel = os.path.relpath(p, self.current_directory).lower() if self.current_directory else p.lower()
+            norm = os.path.normcase(os.path.normpath(os.path.abspath(p)))
+            if needle and needle not in rel:
+                continue
+            if only_fav and norm not in self.favorite_paths:
+                continue
+            filtered.append(p)
+
+        self.filtered_model_files = filtered
+        self._fill_model_list()
+
+        if keep_selection and prev_path:
+            for i in range(self.model_list.count()):
+                item = self.model_list.item(i)
+                if item.data(Qt.UserRole) == prev_path:
+                    self.model_list.setCurrentRow(i)
+                    break
+
+        if not self.filtered_model_files:
+            self.favorite_toggle_button.setText("☆")
+            self.status_label.setText("Нет моделей по текущему фильтру.")
+            self._append_index_status()
+        else:
+            if self.model_list.currentRow() < 0:
+                self.model_list.setCurrentRow(0)
+
+    def _refresh_favorites_from_db(self):
+        self.favorite_paths = get_favorite_paths(root=self.current_directory, db_path=self.catalog_db_path)
+
+    def _toggle_current_favorite(self):
+        item = self.model_list.currentItem()
+        if item is None:
+            return
+        path = item.data(Qt.UserRole)
+        if not path:
+            return
+        norm = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+        is_fav = norm in self.favorite_paths
+        set_asset_favorite(path, not is_fav, db_path=self.catalog_db_path)
+        if is_fav:
+            self.favorite_paths.discard(norm)
+        else:
+            self.favorite_paths.add(norm)
+        self._update_favorite_button_for_current()
+        self._apply_model_filters(keep_selection=True)
+        self._refresh_catalog_events()
+
+    def _update_favorite_button_for_current(self):
+        item = self.model_list.currentItem()
+        if item is None:
+            self.favorite_toggle_button.setText("☆")
+            return
+        path = item.data(Qt.UserRole) or ""
+        norm = os.path.normcase(os.path.normpath(os.path.abspath(path))) if path else ""
+        self.favorite_toggle_button.setText("★" if norm in self.favorite_paths else "☆")
 
     def _append_index_status(self):
         if not self._last_index_summary:
@@ -776,6 +881,49 @@ class MainWindow(QMainWindow):
         self.status_label.setText(
             f"{base} | Индекс: +{summary.get('new', 0)} ~{summary.get('updated', 0)} -{summary.get('removed', 0)}"
         )
+
+    def _build_catalog_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Каталог моделей")
+        dialog.resize(760, 520)
+
+        layout = QVBoxLayout(dialog)
+        db_label = QLabel(dialog)
+        db_label.setWordWrap(True)
+        layout.addWidget(db_label)
+
+        scan_label = QLabel(dialog)
+        scan_label.setWordWrap(True)
+        layout.addWidget(scan_label)
+
+        scan_button = QPushButton("Сканировать каталог", dialog)
+        scan_button.clicked.connect(self._scan_catalog_now)
+        layout.addWidget(scan_button)
+
+        events_list = QListWidget(dialog)
+        layout.addWidget(events_list, stretch=1)
+
+        self.catalog_dialog = dialog
+        self.catalog_dialog_db_label = db_label
+        self.catalog_dialog_scan_label = scan_label
+        self.catalog_dialog_events_list = events_list
+        self._sync_catalog_dialog_state()
+        self._refresh_catalog_events()
+
+    def _sync_catalog_dialog_state(self):
+        if self.catalog_dialog_db_label is not None:
+            self.catalog_dialog_db_label.setText(f"DB: {self.catalog_db_path}")
+        if self.catalog_dialog_scan_label is not None:
+            self.catalog_dialog_scan_label.setText(self._catalog_scan_text)
+
+    def _open_catalog_dialog(self):
+        if self.catalog_dialog is None:
+            self._build_catalog_dialog()
+        self._sync_catalog_dialog_state()
+        self._refresh_catalog_events()
+        self.catalog_dialog.show()
+        self.catalog_dialog.raise_()
+        self.catalog_dialog.activateWindow()
 
     def _confirm_heavy_model_load(self, file_path: str) -> bool:
         try:
