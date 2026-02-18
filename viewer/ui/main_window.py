@@ -1,6 +1,7 @@
 import json
 import os
-from PyQt5.QtCore import QObject, QSettings, Qt, QThread, pyqtSignal
+from PyQt5.QtCore import QSettings, QSize, Qt, QThread, QTimer
+from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -24,54 +25,15 @@ from PyQt5.QtWidgets import (
 )
 
 from viewer.ui.opengl_widget import OpenGLWidget
-from viewer.loaders.model_loader import load_model_payload
+from viewer.ui.workers import CatalogIndexWorker, ModelLoadWorker
 from viewer.services.catalog_db import (
     get_favorite_paths,
+    get_preview_paths_for_assets,
     get_recent_events,
     init_catalog_db,
-    scan_and_index_directory,
     set_asset_favorite,
 )
-
-
-class ModelLoadWorker(QObject):
-    loaded = pyqtSignal(int, object)
-    failed = pyqtSignal(int, str)
-
-    def __init__(self, request_id: int, file_path: str, fast_mode: bool):
-        super().__init__()
-        self.request_id = request_id
-        self.file_path = file_path
-        self.fast_mode = fast_mode
-
-    def run(self):
-        try:
-            payload = load_model_payload(self.file_path, fast_mode=self.fast_mode)
-            self.loaded.emit(self.request_id, payload)
-        except Exception as exc:
-            self.failed.emit(self.request_id, str(exc))
-
-
-class CatalogIndexWorker(QObject):
-    finished = pyqtSignal(dict)
-    failed = pyqtSignal(str)
-
-    def __init__(self, directory: str, model_extensions: tuple, db_path: str):
-        super().__init__()
-        self.directory = directory
-        self.model_extensions = model_extensions
-        self.db_path = db_path
-
-    def run(self):
-        try:
-            summary = scan_and_index_directory(
-                self.directory,
-                self.model_extensions,
-                db_path=self.db_path,
-            )
-            self.finished.emit(summary)
-        except Exception as exc:
-            self.failed.emit(str(exc))
+from viewer.services.preview_cache import save_viewport_preview
 
 
 class MainWindow(QMainWindow):
@@ -109,6 +71,10 @@ class MainWindow(QMainWindow):
         self.catalog_dialog_db_label = None
         self.catalog_dialog_scan_label = None
         self.catalog_dialog_events_list = None
+        self._preview_icon_cache = {}
+        self._thumb_size = 64
+        self._current_categories = []
+        self._pending_category_filter = "Все"
         self.init_ui()
         self._register_shortcuts()
         self._restore_view_settings()
@@ -143,20 +109,24 @@ class MainWindow(QMainWindow):
         self.directory_label.setWordWrap(True)
         panel_layout.addWidget(self.directory_label)
 
-        self.model_list = QListWidget(self)
-        self.model_list.itemSelectionChanged.connect(self.on_selection_changed)
-        panel_layout.addWidget(self.model_list, stretch=1)
-
         filter_layout = QHBoxLayout()
         self.search_input = QLineEdit(self)
         self.search_input.setPlaceholderText("Поиск по имени или пути...")
         self.search_input.textChanged.connect(self._on_filters_changed)
         filter_layout.addWidget(self.search_input, stretch=1)
+        self.category_combo = QComboBox(self)
+        self.category_combo.currentIndexChanged.connect(self._on_filters_changed)
+        filter_layout.addWidget(self.category_combo, stretch=1)
         self.only_favorites_checkbox = QCheckBox("★", self)
         self.only_favorites_checkbox.setToolTip("Показывать только избранные")
         self.only_favorites_checkbox.stateChanged.connect(self._on_filters_changed)
         filter_layout.addWidget(self.only_favorites_checkbox)
         panel_layout.addLayout(filter_layout)
+
+        self.model_list = QListWidget(self)
+        self.model_list.setIconSize(QSize(self._thumb_size, self._thumb_size))
+        self.model_list.itemSelectionChanged.connect(self.on_selection_changed)
+        panel_layout.addWidget(self.model_list, stretch=1)
 
         nav_layout = QHBoxLayout()
         self.prev_button = QPushButton("Предыдущая", self)
@@ -321,6 +291,7 @@ class MainWindow(QMainWindow):
         shadows = self.settings.value("view/shadows_enabled", False, type=bool)
         search_text = self.settings.value("view/search_text", "", type=str)
         only_fav = self.settings.value("view/only_favorites", False, type=bool)
+        category_name = self.settings.value("view/category_filter", "Все", type=str)
 
         self.rotate_speed_slider.setValue(max(self.rotate_speed_slider.minimum(), min(self.rotate_speed_slider.maximum(), rotate_speed)))
         self.zoom_speed_slider.setValue(max(self.zoom_speed_slider.minimum(), min(self.zoom_speed_slider.maximum(), zoom_speed)))
@@ -338,6 +309,7 @@ class MainWindow(QMainWindow):
         self.shadows_checkbox.setChecked(bool(shadows))
         self.search_input.setText(search_text)
         self.only_favorites_checkbox.setChecked(bool(only_fav))
+        self._pending_category_filter = category_name or "Все"
 
     def _restore_last_directory(self):
         last_directory = self.settings.value("last_directory", "", type=str)
@@ -359,6 +331,8 @@ class MainWindow(QMainWindow):
         self.settings.setValue("last_directory", directory)
         self.directory_label.setText(directory)
         self.model_files = self._scan_models(directory)
+        self._populate_category_filter()
+        self._restore_category_filter(self._pending_category_filter)
         self._refresh_favorites_from_db()
         self._apply_model_filters(keep_selection=False)
         self._start_index_scan(directory)
@@ -385,10 +359,50 @@ class MainWindow(QMainWindow):
                 full_path = os.path.join(root, name)
                 if name.lower().endswith(self.model_extensions):
                     files.append(full_path)
-        files.sort(key=lambda p: os.path.basename(p).lower())
+        files.sort(key=lambda p: os.path.relpath(p, directory).lower())
         return files
 
+    def _top_category(self, file_path: str) -> str:
+        if not self.current_directory:
+            return "Без категории"
+        try:
+            rel = os.path.relpath(file_path, self.current_directory)
+        except Exception:
+            return "Без категории"
+        rel = rel.replace("\\", "/")
+        if "/" in rel:
+            return rel.split("/", 1)[0]
+        return "Корень"
+
+    def _populate_category_filter(self):
+        categories = []
+        for p in self.model_files:
+            categories.append(self._top_category(p))
+        unique = sorted(set(categories), key=lambda x: x.lower())
+        self._current_categories = unique
+        prev = self.category_combo.currentText() if hasattr(self, "category_combo") else "Все"
+        self.category_combo.blockSignals(True)
+        self.category_combo.clear()
+        self.category_combo.addItem("Все", "all")
+        for cat in unique:
+            self.category_combo.addItem(cat, cat)
+        idx = self.category_combo.findText(prev)
+        self.category_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.category_combo.blockSignals(False)
+
+    def _restore_category_filter(self, category_name: str):
+        idx = self.category_combo.findText(category_name or "Все")
+        if idx >= 0:
+            self.category_combo.setCurrentIndex(idx)
+        else:
+            self.category_combo.setCurrentIndex(0)
+
     def _fill_model_list(self):
+        preview_map = get_preview_paths_for_assets(
+            self.filtered_model_files,
+            db_path=self.catalog_db_path,
+            kind="thumb",
+        )
         self.model_list.clear()
         for file_path in self.filtered_model_files:
             display_name = os.path.relpath(file_path, self.current_directory)
@@ -397,6 +411,12 @@ class MainWindow(QMainWindow):
                 display_name = f"★ {display_name}"
             item = QListWidgetItem(display_name)
             item.setData(Qt.UserRole, file_path)
+            preview_path = preview_map.get(norm)
+            if preview_path and os.path.isfile(preview_path):
+                self._preview_icon_cache[norm] = preview_path
+                icon = QIcon(QPixmap(preview_path))
+                if not icon.isNull():
+                    item.setIcon(icon)
             self.model_list.addItem(item)
 
     def _load_model_at_row(self, row):
@@ -703,6 +723,8 @@ class MainWindow(QMainWindow):
         self._populate_material_controls(self.gl_widget.last_texture_sets)
         self._update_status(row)
         self.setWindowTitle(f"3D Viewer - {os.path.basename(file_path)}")
+        if file_path:
+            QTimer.singleShot(180, lambda p=file_path: self._capture_model_preview(p))
         if file_path.lower().endswith(".fbx"):
             print("[FBX DEBUG]", self.gl_widget.last_debug_info or {})
             print("[FBX DEBUG] selected_texture:", self.gl_widget.last_texture_path or "<none>")
@@ -800,6 +822,7 @@ class MainWindow(QMainWindow):
         if self._settings_ready:
             self.settings.setValue("view/search_text", self.search_input.text())
             self.settings.setValue("view/only_favorites", self.only_favorites_checkbox.isChecked())
+            self.settings.setValue("view/category_filter", self.category_combo.currentText())
         self._apply_model_filters(keep_selection=True)
 
     def _apply_model_filters(self, keep_selection=True):
@@ -810,11 +833,15 @@ class MainWindow(QMainWindow):
 
         needle = (self.search_input.text() or "").strip().lower()
         only_fav = self.only_favorites_checkbox.isChecked()
+        selected_category = self.category_combo.currentData()
         filtered = []
         for p in self.model_files:
             rel = os.path.relpath(p, self.current_directory).lower() if self.current_directory else p.lower()
             norm = os.path.normcase(os.path.normpath(os.path.abspath(p)))
+            category = self._top_category(p)
             if needle and needle not in rel:
+                continue
+            if selected_category and selected_category != "all" and category != selected_category:
                 continue
             if only_fav and norm not in self.favorite_paths:
                 continue
@@ -881,6 +908,36 @@ class MainWindow(QMainWindow):
         self.status_label.setText(
             f"{base} | Индекс: +{summary.get('new', 0)} ~{summary.get('updated', 0)} -{summary.get('removed', 0)}"
         )
+
+    def _capture_model_preview(self, file_path: str):
+        if not file_path:
+            return
+        try:
+            image = self.gl_widget.grabFramebuffer()
+        except Exception:
+            return
+        preview_path = save_viewport_preview(
+            model_path=file_path,
+            image=image,
+            db_path=self.catalog_db_path,
+            size=self._thumb_size,
+        )
+        if not preview_path or not os.path.isfile(preview_path):
+            return
+        norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
+        self._preview_icon_cache[norm] = preview_path
+        icon = QIcon(QPixmap(preview_path))
+        if icon.isNull():
+            return
+        for i in range(self.model_list.count()):
+            item = self.model_list.item(i)
+            path = item.data(Qt.UserRole) or ""
+            if not path:
+                continue
+            pnorm = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+            if pnorm == norm:
+                item.setIcon(icon)
+                break
 
     def _build_catalog_dialog(self):
         dialog = QDialog(self)

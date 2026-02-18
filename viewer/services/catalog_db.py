@@ -253,6 +253,81 @@ def set_asset_favorite(source_path, favorite, db_path=None):
         conn.close()
 
 
+def get_preview_paths_for_assets(source_paths, db_path=None, kind="thumb"):
+    db_path = db_path or get_default_db_path()
+    if not os.path.isfile(db_path) or not source_paths:
+        return {}
+
+    normalized = [os.path.abspath(p) for p in source_paths if p]
+    if not normalized:
+        return {}
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        placeholders = ",".join(["?"] * len(normalized))
+        query = f"""
+            SELECT a.source_path, p.file_path
+            FROM assets a
+            JOIN previews p ON p.asset_id = a.id
+            WHERE p.kind = ? AND a.source_path IN ({placeholders})
+            ORDER BY p.id DESC
+        """
+        rows = conn.execute(query, [kind] + normalized).fetchall()
+    finally:
+        conn.close()
+
+    out = {}
+    for row in rows:
+        source_path = row["source_path"] or ""
+        preview_path = row["file_path"] or ""
+        if not source_path or not preview_path:
+            continue
+        norm = os.path.normcase(os.path.normpath(os.path.abspath(source_path)))
+        if norm not in out:
+            out[norm] = preview_path
+    return out
+
+
+def set_asset_preview(source_path, preview_path, width=None, height=None, kind="thumb", db_path=None):
+    db_path = init_catalog_db(db_path)
+    source_path = os.path.abspath(source_path)
+    now = _utc_now_iso()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA foreign_keys=ON;")
+        row = conn.execute("SELECT id FROM assets WHERE source_path=? LIMIT 1", (source_path,)).fetchone()
+        if row is None:
+            cur = conn.execute(
+                """
+                INSERT INTO assets(name, source_path, created_at, updated_at, last_seen_at)
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (os.path.basename(source_path), source_path, now, now, now),
+            )
+            asset_id = int(cur.lastrowid)
+        else:
+            asset_id = int(row["id"])
+            conn.execute(
+                "UPDATE assets SET updated_at=?, last_seen_at=? WHERE id=?",
+                (now, now, asset_id),
+            )
+
+        conn.execute("DELETE FROM previews WHERE asset_id=? AND kind=?", (asset_id, kind))
+        conn.execute(
+            """
+            INSERT INTO previews(asset_id, kind, file_path, width, height, created_at)
+            VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            (asset_id, kind, preview_path, width, height, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _load_existing_assets(conn, root):
     like_root = root + os.sep + "%"
     rows = conn.execute(
