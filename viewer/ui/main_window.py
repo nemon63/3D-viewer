@@ -1,7 +1,7 @@
 import json
 import os
 from PyQt5.QtCore import QSettings, QSize, Qt, QThread, QTimer
-from PyQt5.QtGui import QIcon, QPixmap
+from PyQt5.QtGui import QColor, QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QAction,
@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QDialog,
     QDockWidget,
+    QColorDialog,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -275,6 +276,13 @@ class MainWindow(QMainWindow):
         light_group = QGroupBox("Свет", self)
         light_layout = QFormLayout(light_group)
 
+        self.theme_combo = QComboBox(self)
+        self.theme_combo.addItem("Light", "light")
+        self.theme_combo.addItem("Dark", "dark")
+        self.theme_combo.addItem("Graphite", "graphite")
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        light_layout.addRow("UI Theme", self.theme_combo)
+
         self.ambient_label = QLabel("0.08", self)
         self.ambient_slider = QSlider(Qt.Horizontal, self)
         self.ambient_slider.setRange(0, 50)
@@ -307,6 +315,18 @@ class MainWindow(QMainWindow):
         light_layout.addRow("Background", self.bg_brightness_slider)
         light_layout.addRow("Background x", self.bg_brightness_label)
 
+        self.bg_color_button = QPushButton("Выбрать цвет фона", self)
+        self.bg_color_button.clicked.connect(self._choose_background_color)
+        light_layout.addRow(self.bg_color_button)
+
+        self.bg_gradient_label = QLabel("1.00", self)
+        self.bg_gradient_slider = QSlider(Qt.Horizontal, self)
+        self.bg_gradient_slider.setRange(0, 100)
+        self.bg_gradient_slider.setValue(100)
+        self.bg_gradient_slider.valueChanged.connect(self._on_background_gradient_changed)
+        light_layout.addRow("Gradient", self.bg_gradient_slider)
+        light_layout.addRow("Gradient x", self.bg_gradient_label)
+
         self.shadows_checkbox = QCheckBox("Shadows (Experimental)", self)
         self.shadows_checkbox.setChecked(False)
         self.shadows_checkbox.stateChanged.connect(self._on_shadows_toggled)
@@ -331,12 +351,16 @@ class MainWindow(QMainWindow):
         self._on_key_light_changed(self.key_light_slider.value())
         self._on_fill_light_changed(self.fill_light_slider.value())
         self._on_background_brightness_changed(self.bg_brightness_slider.value())
+        self._on_background_gradient_changed(self.bg_gradient_slider.value())
         self._on_shadows_toggled(Qt.Unchecked)
         self.statusBar().showMessage("Готово")
 
     def _init_main_toolbar(self):
         toolbar = QToolBar("Main", self)
         toolbar.setMovable(False)
+        toolbar.setFloatable(False)
+        toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        toolbar.setStyleSheet("QToolButton { padding: 6px 10px; margin: 0 3px; }")
         self.addToolBar(Qt.TopToolBarArea, toolbar)
 
         act_choose = QAction("Папка", self)
@@ -417,6 +441,9 @@ class MainWindow(QMainWindow):
         key_light = self.settings.value("view/key_light_slider", 180, type=int)
         fill_light = self.settings.value("view/fill_light_slider", 100, type=int)
         bg_brightness = self.settings.value("view/bg_brightness_slider", 100, type=int)
+        bg_gradient = self.settings.value("view/bg_gradient_slider", 100, type=int)
+        ui_theme = self.settings.value("view/ui_theme", "graphite", type=str)
+        bg_color_hex = self.settings.value("view/bg_color_hex", "#14233f", type=str)
         projection = self.settings.value("view/projection_mode", "perspective", type=str)
         render_mode = self.settings.value("view/render_mode", "quality", type=str)
         shadows = self.settings.value("view/shadows_enabled", False, type=bool)
@@ -430,6 +457,16 @@ class MainWindow(QMainWindow):
         self.key_light_slider.setValue(max(self.key_light_slider.minimum(), min(self.key_light_slider.maximum(), key_light)))
         self.fill_light_slider.setValue(max(self.fill_light_slider.minimum(), min(self.fill_light_slider.maximum(), fill_light)))
         self.bg_brightness_slider.setValue(max(self.bg_brightness_slider.minimum(), min(self.bg_brightness_slider.maximum(), bg_brightness)))
+        self.bg_gradient_slider.setValue(max(self.bg_gradient_slider.minimum(), min(self.bg_gradient_slider.maximum(), bg_gradient)))
+
+        theme_idx = self.theme_combo.findData(ui_theme)
+        if theme_idx >= 0:
+            self.theme_combo.setCurrentIndex(theme_idx)
+        self._apply_ui_theme(ui_theme)
+
+        qcolor = QColor(bg_color_hex if bg_color_hex else "#14233f")
+        if qcolor.isValid():
+            self._apply_background_color(qcolor)
 
         projection_idx = self.projection_combo.findData(projection)
         if projection_idx >= 0:
@@ -861,6 +898,62 @@ class MainWindow(QMainWindow):
         if self._settings_ready:
             self.settings.setValue("view/bg_brightness_slider", int(value))
 
+    def _on_background_gradient_changed(self, value: int):
+        strength = value / 100.0
+        self.bg_gradient_label.setText(f"{strength:.2f}")
+        self.gl_widget.set_background_gradient_strength(strength)
+        if self._settings_ready:
+            self.settings.setValue("view/bg_gradient_slider", int(value))
+
+    def _choose_background_color(self):
+        current = QColor(self.settings.value("view/bg_color_hex", "#14233f", type=str))
+        color = QColorDialog.getColor(current, self, "Выбрать цвет фона")
+        if not color.isValid():
+            return
+        self._apply_background_color(color)
+        if self._settings_ready:
+            self.settings.setValue("view/bg_color_hex", color.name())
+
+    def _apply_background_color(self, color: QColor):
+        self.bg_color_button.setStyleSheet(f"background-color: {color.name()};")
+        self.gl_widget.set_background_color(color.redF(), color.greenF(), color.blueF())
+
+    def _on_theme_changed(self):
+        theme = self.theme_combo.currentData() or "graphite"
+        self._apply_ui_theme(theme)
+        if self._settings_ready:
+            self.settings.setValue("view/ui_theme", theme)
+
+    def _apply_ui_theme(self, theme: str):
+        if theme == "light":
+            self.setStyleSheet("")
+            return
+        if theme == "dark":
+            self.setStyleSheet(
+                """
+                QWidget { background: #1e1f22; color: #e4e7eb; }
+                QLineEdit, QComboBox, QListWidget, QTreeWidget, QTabWidget::pane { background: #25272b; color: #e4e7eb; border: 1px solid #3a3d43; }
+                QPushButton { background: #2c2f35; border: 1px solid #454a52; padding: 5px 8px; }
+                QPushButton:hover { background: #353941; }
+                QSlider::groove:horizontal { background: #3a3d43; height: 6px; }
+                QSlider::handle:horizontal { background: #7da3ff; width: 12px; margin: -4px 0; border-radius: 5px; }
+                QToolBar { background: #1b1d20; border-bottom: 1px solid #3a3d43; }
+                """
+            )
+            return
+        # graphite
+        self.setStyleSheet(
+            """
+            QWidget { background: #2b2f36; color: #eceff4; }
+            QLineEdit, QComboBox, QListWidget, QTreeWidget, QTabWidget::pane { background: #323741; color: #eceff4; border: 1px solid #4a5362; }
+            QPushButton { background: #3a404c; border: 1px solid #586273; padding: 5px 8px; }
+            QPushButton:hover { background: #444b58; }
+            QSlider::groove:horizontal { background: #4a5362; height: 6px; }
+            QSlider::handle:horizontal { background: #86b6ff; width: 12px; margin: -4px 0; border-radius: 5px; }
+            QToolBar { background: #252a31; border-bottom: 1px solid #4a5362; }
+            """
+        )
+
     def _on_shadows_toggled(self, state: int):
         enabled = state == Qt.Checked
         active = self.gl_widget.set_shadows_enabled(enabled)
@@ -901,6 +994,10 @@ class MainWindow(QMainWindow):
         self.key_light_slider.setValue(180)
         self.fill_light_slider.setValue(100)
         self.bg_brightness_slider.setValue(100)
+        self.bg_gradient_slider.setValue(100)
+        self._apply_background_color(QColor("#14233f"))
+        if self._settings_ready:
+            self.settings.setValue("view/bg_color_hex", "#14233f")
         self.shadows_checkbox.setChecked(False)
         self._update_status(self._current_model_index())
 

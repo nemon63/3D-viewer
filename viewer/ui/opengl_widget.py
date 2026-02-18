@@ -413,6 +413,8 @@ class OpenGLWidget(QOpenGLWidget):
         self.shadow_requested = False
         self.shadow_status_message = "off"
         self.background_brightness = 1.0
+        self.background_color = np.array([0.08, 0.10, 0.15], dtype=np.float32)
+        self.background_gradient_strength = 1.0
         self.shadow_size = 1024
         self.shadow_fbo = 0
         self.shadow_depth_tex = 0
@@ -724,8 +726,10 @@ class OpenGLWidget(QOpenGLWidget):
         glLoadIdentity()
 
         b = min(max(self.background_brightness, 0.2), 2.0)
-        bottom = np.clip(np.array([0.03, 0.03, 0.05]) * b, 0.0, 1.0)
-        top = np.clip(np.array([0.09, 0.11, 0.16]) * b, 0.0, 1.0)
+        s = min(max(self.background_gradient_strength, 0.0), 1.0)
+        base = np.clip(self.background_color.astype(np.float32), 0.0, 1.0)
+        top = np.clip(base * (1.0 + 0.45 * s) * b, 0.0, 1.0)
+        bottom = np.clip(base * (1.0 - 0.55 * s) * b, 0.0, 1.0)
 
         glBegin(GL_QUADS)
         glColor3f(float(bottom[0]), float(bottom[1]), float(bottom[2]))  # bottom
@@ -1079,6 +1083,21 @@ class OpenGLWidget(QOpenGLWidget):
 
     def set_background_brightness(self, value: float):
         self.background_brightness = min(max(value, 0.2), 2.0)
+        self.update()
+
+    def set_background_color(self, r: float, g: float, bl: float):
+        self.background_color = np.array(
+            [
+                min(max(float(r), 0.0), 1.0),
+                min(max(float(g), 0.0), 1.0),
+                min(max(float(bl), 0.0), 1.0),
+            ],
+            dtype=np.float32,
+        )
+        self.update()
+
+    def set_background_gradient_strength(self, value: float):
+        self.background_gradient_strength = min(max(float(value), 0.0), 1.0)
         self.update()
 
     def set_shadows_enabled(self, enabled: bool):
