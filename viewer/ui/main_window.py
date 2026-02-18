@@ -13,13 +13,14 @@ from PyQt5.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
-    QListWidgetItem,
     QMessageBox,
     QMainWindow,
     QPushButton,
     QShortcut,
     QSlider,
     QTabWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -75,6 +76,7 @@ class MainWindow(QMainWindow):
         self._thumb_size = 64
         self._current_categories = []
         self._pending_category_filter = "Все"
+        self._model_item_by_path = {}
         self.init_ui()
         self._register_shortcuts()
         self._restore_view_settings()
@@ -123,7 +125,8 @@ class MainWindow(QMainWindow):
         filter_layout.addWidget(self.only_favorites_checkbox)
         panel_layout.addLayout(filter_layout)
 
-        self.model_list = QListWidget(self)
+        self.model_list = QTreeWidget(self)
+        self.model_list.setHeaderHidden(True)
         self.model_list.setIconSize(QSize(self._thumb_size, self._thumb_size))
         self.model_list.itemSelectionChanged.connect(self.on_selection_changed)
         panel_layout.addWidget(self.model_list, stretch=1)
@@ -342,7 +345,7 @@ class MainWindow(QMainWindow):
             return
 
         if auto_select_first:
-            self.model_list.setCurrentRow(0)
+            self._select_model_by_index(0)
         else:
             self.model_list.clearSelection()
             self.status_label.setText(
@@ -404,20 +407,34 @@ class MainWindow(QMainWindow):
             kind="thumb",
         )
         self.model_list.clear()
+        self._model_item_by_path = {}
+        category_roots = {}
         for file_path in self.filtered_model_files:
             display_name = os.path.relpath(file_path, self.current_directory)
             norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
+            category = self._top_category(file_path)
             if norm in self.favorite_paths:
                 display_name = f"★ {display_name}"
-            item = QListWidgetItem(display_name)
-            item.setData(Qt.UserRole, file_path)
+            cat_item = category_roots.get(category)
+            if cat_item is None:
+                cat_item = QTreeWidgetItem([category])
+                cat_item.setData(0, Qt.UserRole, "")
+                self.model_list.addTopLevelItem(cat_item)
+                category_roots[category] = cat_item
+
+            item = QTreeWidgetItem([display_name])
+            item.setData(0, Qt.UserRole, file_path)
             preview_path = preview_map.get(norm)
             if preview_path and os.path.isfile(preview_path):
                 self._preview_icon_cache[norm] = preview_path
                 icon = QIcon(QPixmap(preview_path))
                 if not icon.isNull():
-                    item.setIcon(icon)
-            self.model_list.addItem(item)
+                    item.setIcon(0, icon)
+            cat_item.addChild(item)
+            self._model_item_by_path[norm] = item
+
+        for i in range(self.model_list.topLevelItemCount()):
+            self.model_list.topLevelItem(i).setExpanded(True)
 
     def _load_model_at_row(self, row):
         if row < 0 or row >= len(self.filtered_model_files):
@@ -427,30 +444,56 @@ class MainWindow(QMainWindow):
             return
         self._start_async_model_load(row, file_path)
 
+    def _current_selected_path(self):
+        item = self.model_list.currentItem()
+        if item is None:
+            return ""
+        return item.data(0, Qt.UserRole) or ""
+
+    def _current_model_index(self):
+        path = self._current_selected_path()
+        if not path:
+            return -1
+        try:
+            return self.filtered_model_files.index(path)
+        except ValueError:
+            return -1
+
+    def _select_model_by_index(self, index: int):
+        if index < 0 or index >= len(self.filtered_model_files):
+            return
+        path = self.filtered_model_files[index]
+        norm = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+        item = self._model_item_by_path.get(norm)
+        if item is None:
+            return
+        self.model_list.setCurrentItem(item)
+        self.model_list.scrollToItem(item)
+
     def on_selection_changed(self):
-        row = self.model_list.currentRow()
+        row = self._current_model_index()
         self._update_favorite_button_for_current()
         self._load_model_at_row(row)
 
     def show_previous_model(self):
         if not self.filtered_model_files:
             return
-        row = self.model_list.currentRow()
+        row = self._current_model_index()
         if row <= 0:
             row = len(self.filtered_model_files) - 1
         else:
             row -= 1
-        self.model_list.setCurrentRow(row)
+        self._select_model_by_index(row)
 
     def show_next_model(self):
         if not self.filtered_model_files:
             return
-        row = self.model_list.currentRow()
+        row = self._current_model_index()
         if row < 0 or row >= len(self.filtered_model_files) - 1:
             row = 0
         else:
             row += 1
-        self.model_list.setCurrentRow(row)
+        self._select_model_by_index(row)
 
     def keyPressEvent(self, event):
         key_mappings = {
@@ -505,16 +548,16 @@ class MainWindow(QMainWindow):
     def _reset_view_action(self):
         self.gl_widget.reset_view()
         self._sync_projection_combo()
-        self._update_status(self.model_list.currentRow())
+        self._update_status(self._current_model_index())
 
     def _toggle_projection_action(self):
         self.gl_widget.toggle_projection_mode()
         self._sync_projection_combo()
-        self._update_status(self.model_list.currentRow())
+        self._update_status(self._current_model_index())
 
     def _toggle_lit_action(self):
         self.gl_widget.unlit_texture_preview = not self.gl_widget.unlit_texture_preview
-        self._update_status(self.model_list.currentRow())
+        self._update_status(self._current_model_index())
         self.gl_widget.update()
 
     def _populate_material_controls(self, texture_sets):
@@ -544,7 +587,7 @@ class MainWindow(QMainWindow):
         path = combo.currentData()
         if path:
             self.gl_widget.apply_texture_path("basecolor", path)
-            self._update_status(self.model_list.currentRow())
+            self._update_status(self._current_model_index())
 
     def _apply_channel_texture(self, channel):
         combo = self.material_boxes.get(channel)
@@ -552,7 +595,7 @@ class MainWindow(QMainWindow):
             return
         path = combo.currentData()
         self.gl_widget.apply_texture_path(channel, path or "")
-        self._update_status(self.model_list.currentRow())
+        self._update_status(self._current_model_index())
 
     def _update_status(self, row):
         if row < 0 or row >= len(self.filtered_model_files):
@@ -581,7 +624,7 @@ class MainWindow(QMainWindow):
         self.gl_widget.set_projection_mode(mode)
         if self._settings_ready:
             self.settings.setValue("view/projection_mode", mode)
-        self._update_status(self.model_list.currentRow())
+        self._update_status(self._current_model_index())
 
     def _on_render_mode_changed(self):
         mode = self.render_mode_combo.currentData() or "quality"
@@ -589,7 +632,7 @@ class MainWindow(QMainWindow):
         self.gl_widget.set_fast_mode(mode == "fast")
         if self._settings_ready:
             self.settings.setValue("view/render_mode", mode)
-            row = self.model_list.currentRow()
+            row = self._current_model_index()
             if 0 <= row < len(self.filtered_model_files):
                 self._load_model_at_row(row)
 
@@ -647,7 +690,7 @@ class MainWindow(QMainWindow):
         else:
             if self._settings_ready:
                 self.settings.setValue("view/shadows_enabled", bool(active))
-        self._update_status(self.model_list.currentRow())
+        self._update_status(self._current_model_index())
 
     def _sync_projection_combo(self):
         wanted = "orthographic" if self.gl_widget.projection_mode == "orthographic" else "perspective"
@@ -668,7 +711,7 @@ class MainWindow(QMainWindow):
             self.render_mode_combo.setCurrentIndex(mode_idx)
         self.gl_widget.reset_view()
         self._sync_projection_combo()
-        self._update_status(self.model_list.currentRow())
+        self._update_status(self._current_model_index())
 
     def _reset_light_settings(self):
         self.ambient_slider.setValue(8)
@@ -676,7 +719,7 @@ class MainWindow(QMainWindow):
         self.fill_light_slider.setValue(100)
         self.bg_brightness_slider.setValue(100)
         self.shadows_checkbox.setChecked(False)
-        self._update_status(self.model_list.currentRow())
+        self._update_status(self._current_model_index())
 
     def _start_async_model_load(self, row: int, file_path: str):
         self._load_request_id += 1
@@ -827,9 +870,8 @@ class MainWindow(QMainWindow):
 
     def _apply_model_filters(self, keep_selection=True):
         prev_path = ""
-        current_item = self.model_list.currentItem()
-        if keep_selection and current_item is not None:
-            prev_path = current_item.data(Qt.UserRole) or ""
+        if keep_selection:
+            prev_path = self._current_selected_path()
 
         needle = (self.search_input.text() or "").strip().lower()
         only_fav = self.only_favorites_checkbox.isChecked()
@@ -851,28 +893,25 @@ class MainWindow(QMainWindow):
         self._fill_model_list()
 
         if keep_selection and prev_path:
-            for i in range(self.model_list.count()):
-                item = self.model_list.item(i)
-                if item.data(Qt.UserRole) == prev_path:
-                    self.model_list.setCurrentRow(i)
-                    break
+            try:
+                idx = self.filtered_model_files.index(prev_path)
+                self._select_model_by_index(idx)
+            except ValueError:
+                pass
 
         if not self.filtered_model_files:
             self.favorite_toggle_button.setText("☆")
             self.status_label.setText("Нет моделей по текущему фильтру.")
             self._append_index_status()
         else:
-            if self.model_list.currentRow() < 0:
-                self.model_list.setCurrentRow(0)
+            if self._current_model_index() < 0:
+                self._select_model_by_index(0)
 
     def _refresh_favorites_from_db(self):
         self.favorite_paths = get_favorite_paths(root=self.current_directory, db_path=self.catalog_db_path)
 
     def _toggle_current_favorite(self):
-        item = self.model_list.currentItem()
-        if item is None:
-            return
-        path = item.data(Qt.UserRole)
+        path = self._current_selected_path()
         if not path:
             return
         norm = os.path.normcase(os.path.normpath(os.path.abspath(path)))
@@ -887,11 +926,7 @@ class MainWindow(QMainWindow):
         self._refresh_catalog_events()
 
     def _update_favorite_button_for_current(self):
-        item = self.model_list.currentItem()
-        if item is None:
-            self.favorite_toggle_button.setText("☆")
-            return
-        path = item.data(Qt.UserRole) or ""
+        path = self._current_selected_path()
         norm = os.path.normcase(os.path.normpath(os.path.abspath(path))) if path else ""
         self.favorite_toggle_button.setText("★" if norm in self.favorite_paths else "☆")
 
@@ -929,15 +964,9 @@ class MainWindow(QMainWindow):
         icon = QIcon(QPixmap(preview_path))
         if icon.isNull():
             return
-        for i in range(self.model_list.count()):
-            item = self.model_list.item(i)
-            path = item.data(Qt.UserRole) or ""
-            if not path:
-                continue
-            pnorm = os.path.normcase(os.path.normpath(os.path.abspath(path)))
-            if pnorm == norm:
-                item.setIcon(icon)
-                break
+        item = self._model_item_by_path.get(norm)
+        if item is not None:
+            item.setIcon(0, icon)
 
     def _build_catalog_dialog(self):
         dialog = QDialog(self)
