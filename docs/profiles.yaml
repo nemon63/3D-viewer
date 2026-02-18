@@ -1,0 +1,50 @@
+version: 1
+pipelines:
+  unity_urp:
+    required_channels: [basecolor, normal]
+    optional_channels: [metal, roughness, ao, emissive, opacity]
+    packed_maps:
+      - name: mask_map
+        channels:
+          R: metallic
+          G: occlusion
+          B: detail_mask
+          A: smoothness
+  unity_standard:
+    required_channels: [basecolor]
+    optional_channels: [normal, metallic, roughness, ao, emissive, opacity]
+  unity_hdrp:
+    required_channels: [basecolor, normal, mask_map]
+    optional_channels: [height, emissive, opacity]
+  unreal:
+    required_channels: [basecolor, normal]
+    optional_channels: [orm, roughness, metallic, ao, emissive, opacity]
+    packed_maps:
+      - name: orm
+        channels:
+          R: occlusion
+          G: roughness
+          B: metallic
+  offline:
+    required_channels: [basecolor]
+    optional_channels: [normal, roughness, metallic, specular, displacement, opacity, emissive]
+
+validation:
+  naming:
+    model_pattern: '^[A-Za-z0-9_\-\.]+$'
+    texture_pattern: '^[A-Za-z0-9_\-\.]+$'
+  limits:
+    max_texture_resolution: 8192
+    max_texture_size_mb: 256
+    max_polycount_warning: 2000000
+  formats:
+    model: [fbx, obj, gltf, glb]
+    texture: [png, tga, jpg, jpeg, tif, tiff, exr]
+
+udim:
+  enabled: true
+  tile_pattern: '(?P<base>.*?)(?P<tile>1\d{3})(?P<ext>\.[A-Za-z0-9]+)$'
+
+events:
+  log_jsonl: true
+  jsonl_path: 'logs/catalog_events.jsonl'

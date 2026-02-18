@@ -1,3 +1,4 @@
+import json
 import os
 from PyQt5.QtCore import QObject, QSettings, Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
@@ -22,6 +23,7 @@ from PyQt5.QtWidgets import (
 
 from viewer.ui.opengl_widget import OpenGLWidget
 from viewer.loaders.model_loader import load_model_payload
+from viewer.services.catalog_db import get_recent_events, init_catalog_db, scan_and_index_directory
 
 
 class ModelLoadWorker(QObject):
@@ -42,6 +44,28 @@ class ModelLoadWorker(QObject):
             self.failed.emit(self.request_id, str(exc))
 
 
+class CatalogIndexWorker(QObject):
+    finished = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, directory: str, model_extensions: tuple, db_path: str):
+        super().__init__()
+        self.directory = directory
+        self.model_extensions = model_extensions
+        self.db_path = db_path
+
+    def run(self):
+        try:
+            summary = scan_and_index_directory(
+                self.directory,
+                self.model_extensions,
+                db_path=self.db_path,
+            )
+            self.finished.emit(summary)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     HEAVY_FILE_SIZE_MB = 200
 
@@ -49,6 +73,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.gl_widget = OpenGLWidget(self)
         self.settings = QSettings("3d-viewer", "model-browser")
+        self.catalog_db_path = init_catalog_db()
         self._settings_ready = False
         self.current_directory = ""
         self.model_files = []
@@ -66,6 +91,9 @@ class MainWindow(QMainWindow):
         self._load_worker = None
         self._load_request_id = 0
         self._active_load_row = -1
+        self._index_thread = None
+        self._index_worker = None
+        self._last_index_summary = None
         self.init_ui()
         self._register_shortcuts()
         self._restore_view_settings()
@@ -92,6 +120,10 @@ class MainWindow(QMainWindow):
         reload_button.clicked.connect(self.reload_directory)
         panel_layout.addWidget(reload_button)
 
+        scan_catalog_button = QPushButton("Сканировать каталог", self)
+        scan_catalog_button.clicked.connect(self._scan_catalog_now)
+        panel_layout.addWidget(scan_catalog_button)
+
         self.directory_label = QLabel("Папка не выбрана")
         self.directory_label.setWordWrap(True)
         panel_layout.addWidget(self.directory_label)
@@ -112,6 +144,19 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Выбери папку с моделями")
         self.status_label.setWordWrap(True)
         panel_layout.addWidget(self.status_label)
+
+        catalog_group = QGroupBox("Каталог", self)
+        catalog_layout = QVBoxLayout(catalog_group)
+        self.catalog_db_label = QLabel(f"DB: {self.catalog_db_path}")
+        self.catalog_db_label.setWordWrap(True)
+        catalog_layout.addWidget(self.catalog_db_label)
+        self.catalog_scan_label = QLabel("Индекс: нет данных")
+        self.catalog_scan_label.setWordWrap(True)
+        catalog_layout.addWidget(self.catalog_scan_label)
+        self.catalog_events_list = QListWidget(self)
+        self.catalog_events_list.setMaximumHeight(120)
+        catalog_layout.addWidget(self.catalog_events_list)
+        panel_layout.addWidget(catalog_group)
 
         controls_tabs = QTabWidget(self)
 
@@ -293,6 +338,7 @@ class MainWindow(QMainWindow):
         self.directory_label.setText(directory)
         self.model_files = self._scan_models(directory)
         self._fill_model_list()
+        self._start_index_scan(directory)
 
         if not self.model_files:
             self.status_label.setText("В выбранной папке нет поддерживаемых моделей.")
@@ -476,6 +522,7 @@ class MainWindow(QMainWindow):
             f"Открыт: {os.path.basename(file_path)} ({row + 1}/{len(self.model_files)}) | "
             f"UV: {uv_count} | Текстур-кандидатов: {tex_count} | Текстура: {tex_file} | {preview} | {projection} | shadows:{shadow_state}"
         )
+        self._append_index_status()
 
     def _on_alpha_cutoff_changed(self, value: int):
         cutoff = value / 100.0
@@ -639,6 +686,96 @@ class MainWindow(QMainWindow):
         self.prev_button.setEnabled(True)
         self.next_button.setEnabled(True)
         self.status_label.setText(f"Ошибка загрузки: {error_text}")
+
+    def _start_index_scan(self, directory: str):
+        if not directory:
+            return
+        self._last_index_summary = None
+        self.catalog_scan_label.setText("Индекс: сканирование...")
+        thread = QThread(self)
+        worker = CatalogIndexWorker(directory, self.model_extensions, self.catalog_db_path)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_index_scan_finished)
+        worker.failed.connect(self._on_index_scan_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._index_thread = thread
+        self._index_worker = worker
+        thread.start()
+
+    def _on_index_scan_finished(self, summary: dict):
+        self._last_index_summary = summary
+        self.catalog_scan_label.setText(
+            f"Индекс: +{summary.get('new', 0)} ~{summary.get('updated', 0)} -{summary.get('removed', 0)} | {summary.get('duration_sec', 0)}s"
+        )
+        self._refresh_catalog_events()
+        self._append_index_status()
+
+    def _on_index_scan_failed(self, error_text: str):
+        self._last_index_summary = {"error": error_text}
+        self.catalog_scan_label.setText(f"Индекс: ошибка ({error_text})")
+        self._refresh_catalog_events()
+        self._append_index_status()
+
+    def _refresh_catalog_events(self):
+        self.catalog_events_list.clear()
+        events = get_recent_events(limit=120, db_path=self.catalog_db_path, root=self.current_directory or None)
+        if not events:
+            self.catalog_events_list.addItem("Событий нет")
+            return
+        for ev in events[:40]:
+            source_path = ev.get("source_path", "") or ""
+            etype = ev.get("event_type", "")
+            payload = {}
+            try:
+                payload = json.loads(ev.get("payload_json", "") or "{}")
+            except Exception:
+                payload = {}
+
+            if etype == "scan_completed":
+                root = payload.get("root", "")
+                seen = payload.get("seen", 0)
+                new_n = payload.get("new", 0)
+                upd_n = payload.get("updated", 0)
+                rem_n = payload.get("removed", 0)
+                created = (ev.get("created_at", "") or "").replace("T", " ")[:19]
+                self.catalog_events_list.addItem(
+                    f"{created} | scan_completed | seen={seen} +{new_n} ~{upd_n} -{rem_n} | {root}"
+                )
+                continue
+
+            if self.current_directory and source_path:
+                try:
+                    path = os.path.relpath(source_path, self.current_directory)
+                except Exception:
+                    path = source_path
+            else:
+                path = source_path or "<unknown>"
+            created = (ev.get("created_at", "") or "").replace("T", " ")[:19]
+            self.catalog_events_list.addItem(f"{created} | {etype} | {path}")
+
+    def _scan_catalog_now(self):
+        if not self.current_directory:
+            self.status_label.setText("Сначала выбери папку для сканирования.")
+            return
+        self._start_index_scan(self.current_directory)
+
+    def _append_index_status(self):
+        if not self._last_index_summary:
+            return
+        base = self.status_label.text()
+        if " | Индекс:" in base:
+            base = base.split(" | Индекс:")[0]
+        summary = self._last_index_summary
+        if "error" in summary:
+            self.status_label.setText(f"{base} | Индекс: ошибка ({summary['error']})")
+            return
+        self.status_label.setText(
+            f"{base} | Индекс: +{summary.get('new', 0)} ~{summary.get('updated', 0)} -{summary.get('removed', 0)}"
+        )
 
     def _confirm_heavy_model_load(self, file_path: str) -> bool:
         try:
