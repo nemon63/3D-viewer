@@ -70,6 +70,7 @@ class MainWindow(QMainWindow):
         self._load_worker = None
         self._load_request_id = 0
         self._active_load_row = -1
+        self._active_load_file_path = ""
         self._index_thread = None
         self._index_worker = None
         self._last_index_summary = None
@@ -692,11 +693,17 @@ class MainWindow(QMainWindow):
         try:
             idx = self.filtered_model_files.index(path)
         except ValueError:
+            # For batch mode we may iterate models outside current filter/category.
+            if self._batch_running:
+                self._start_async_model_load(-1, path)
             return
         current_norm = os.path.normcase(os.path.normpath(os.path.abspath(self.current_file_path))) if self.current_file_path else ""
         target_norm = os.path.normcase(os.path.normpath(os.path.abspath(path)))
         if current_norm == target_norm:
-            self._load_model_at_row(idx)
+            if self._batch_running:
+                self._start_async_model_load(idx, path)
+            else:
+                self._load_model_at_row(idx)
             return
         self._select_model_by_index(idx)
 
@@ -985,6 +992,7 @@ class MainWindow(QMainWindow):
         self._load_request_id += 1
         request_id = self._load_request_id
         self._active_load_row = row
+        self._active_load_file_path = file_path
 
         # Keep previous worker alive; ignore outdated results by request_id.
         self.model_list.setEnabled(False)
@@ -1011,7 +1019,9 @@ class MainWindow(QMainWindow):
         if request_id != self._load_request_id:
             return
         row = self._active_load_row
-        file_path = self.filtered_model_files[row] if 0 <= row < len(self.filtered_model_files) else ""
+        file_path = self._active_load_file_path or (
+            self.filtered_model_files[row] if 0 <= row < len(self.filtered_model_files) else ""
+        )
         loaded = self.gl_widget.apply_payload(payload)
         self.model_list.setEnabled(True)
         self.prev_button.setEnabled(True)
@@ -1163,11 +1173,38 @@ class MainWindow(QMainWindow):
         if not self.current_directory:
             self._set_status_text("Сначала выбери папку с моделями.")
             return
+        mode = "missing_all"
+        if self.catalog_panel is not None:
+            mode = self.catalog_panel.batch_mode()
+
+        source_paths = self.model_files
         targets = []
-        for path in self.model_files:
-            preview_path = build_preview_path_for_model(path, size=self._thumb_size)
-            if not os.path.isfile(preview_path):
-                targets.append(path)
+        if mode == "missing_filtered":
+            source_paths = self.filtered_model_files
+            targets = list(source_paths)
+            for path in targets:
+                preview_path = build_preview_path_for_model(path, size=self._thumb_size)
+                try:
+                    if os.path.isfile(preview_path):
+                        os.remove(preview_path)
+                except OSError:
+                    pass
+        elif mode == "regen_all":
+            source_paths = self.model_files
+            targets = list(source_paths)
+            for path in targets:
+                preview_path = build_preview_path_for_model(path, size=self._thumb_size)
+                try:
+                    if os.path.isfile(preview_path):
+                        os.remove(preview_path)
+                except OSError:
+                    pass
+        else:
+            source_paths = self.model_files
+            for path in source_paths:
+                preview_path = build_preview_path_for_model(path, size=self._thumb_size)
+                if not os.path.isfile(preview_path):
+                    targets.append(path)
         self._batch_paths = targets
         self._batch_index = 0
         self._batch_paused = False
@@ -1176,9 +1213,14 @@ class MainWindow(QMainWindow):
         self._save_batch_state()
         self._update_batch_ui()
         if not self._batch_running:
-            self._set_status_text("Batch: все превью уже готовы.")
+            self._set_status_text("Batch: нет моделей для текущего режима.")
             return
-        self._set_status_text(f"Batch: старт ({len(self._batch_paths)} моделей)")
+        mode_title = {
+            "missing_all": "только отсутствующие",
+            "regen_all": "перегенерировать все",
+            "missing_filtered": "текущий фильтр/категория (все)",
+        }.get(mode, mode)
+        self._set_status_text(f"Batch: старт [{mode_title}] ({len(self._batch_paths)} моделей)")
         self._run_next_batch_item()
 
     def _stop_preview_batch(self):
@@ -1361,6 +1403,8 @@ class MainWindow(QMainWindow):
 
     def _capture_model_preview(self, file_path: str, force: bool = False):
         if not file_path:
+            if self._batch_running and self._batch_current_path:
+                self._advance_batch_after_item()
             return
         should_advance_batch = (
             self._batch_running
@@ -1368,6 +1412,7 @@ class MainWindow(QMainWindow):
             and os.path.normcase(os.path.normpath(self._batch_current_path))
             == os.path.normcase(os.path.normpath(file_path))
         )
+        advanced = False
         expected_path = build_preview_path_for_model(file_path, size=self._thumb_size)
         if (not force) and os.path.isfile(expected_path):
             norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
@@ -1382,10 +1427,13 @@ class MainWindow(QMainWindow):
                     self.catalog_panel.set_item_icon(file_path, expected_path)
             if should_advance_batch:
                 self._advance_batch_after_item()
+                advanced = True
             return
         try:
             image = self.gl_widget.grabFramebuffer()
         except Exception:
+            if should_advance_batch and not advanced:
+                self._advance_batch_after_item()
             return
         preview_path = save_viewport_preview(
             model_path=file_path,
@@ -1394,6 +1442,8 @@ class MainWindow(QMainWindow):
             size=self._thumb_size,
         )
         if not preview_path or not os.path.isfile(preview_path):
+            if should_advance_batch and not advanced:
+                self._advance_batch_after_item()
             return
         norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
         self._preview_icon_cache[norm] = preview_path
@@ -1408,6 +1458,7 @@ class MainWindow(QMainWindow):
             self.catalog_panel.set_item_icon(file_path, preview_path)
         if should_advance_batch:
             self._advance_batch_after_item()
+            advanced = True
 
     def _regenerate_preview_for_path(self, file_path: str):
         if not file_path:

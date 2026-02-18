@@ -108,6 +108,10 @@ class CatalogDockPanel(QWidget):
         self.batch_resume_button = QPushButton("Продолжить", self)
         self.batch_resume_button.clicked.connect(self.batchResumeRequested.emit)
         self.batch_status_label = QLabel("Batch: idle", self)
+        self.batch_mode_combo = QComboBox(self)
+        self.batch_mode_combo.addItem("Только отсутствующие", "missing_all")
+        self.batch_mode_combo.addItem("Перегенерировать все", "regen_all")
+        self.batch_mode_combo.addItem("Текущий фильтр/категория", "missing_filtered")
 
         layout = QVBoxLayout(self)
         top_row = QHBoxLayout()
@@ -130,6 +134,7 @@ class CatalogDockPanel(QWidget):
 
         hint = QLabel("Ctrl + колесо: размер миниатюр", self)
         layout.addWidget(hint)
+        layout.addWidget(self.batch_mode_combo)
         batch_row = QHBoxLayout()
         batch_row.addWidget(self.batch_start_button)
         batch_row.addWidget(self.batch_stop_button)
@@ -192,6 +197,9 @@ class CatalogDockPanel(QWidget):
         self.batch_start_button.setEnabled(not running)
         self.batch_stop_button.setEnabled(running)
         self.batch_resume_button.setEnabled(paused)
+
+    def batch_mode(self):
+        return self.batch_mode_combo.currentData() or "missing_all"
 
     def set_item_icon(self, path: str, preview_path: str):
         norm = os.path.normcase(os.path.normpath(path))
