@@ -4,7 +4,6 @@ from PyQt5.QtCore import QSettings, QSize, Qt, QThread, QTimer
 from PyQt5.QtGui import QColor, QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
-    QAction,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -32,6 +31,7 @@ from PyQt5.QtWidgets import (
 
 from viewer.ui.opengl_widget import OpenGLWidget
 from viewer.ui.catalog_dock import CatalogDockPanel
+from viewer.ui.theme import apply_ui_theme
 from viewer.ui.workers import CatalogIndexWorker, ModelLoadWorker
 from viewer.services.catalog_db import (
     get_favorite_paths,
@@ -89,8 +89,6 @@ class MainWindow(QMainWindow):
         self.settings_dock = None
         self._syncing_filters_from_dock = False
         self.main_toolbar = None
-        self.action_show_catalog = None
-        self.action_show_settings = None
         self.init_ui()
         self._register_shortcuts()
         self._restore_view_settings()
@@ -360,38 +358,38 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         toolbar.setFloatable(False)
         toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        toolbar.setStyleSheet("QToolButton { padding: 6px 10px; margin: 0 3px; }")
+        toolbar.setStyleSheet("QToolButton, QPushButton { padding: 6px 10px; margin: 0 2px; }")
         self.addToolBar(Qt.TopToolBarArea, toolbar)
 
-        act_choose = QAction("Папка", self)
-        act_choose.triggered.connect(self.choose_directory)
-        toolbar.addAction(act_choose)
+        btn_choose = QPushButton("Папка", self)
+        btn_choose.clicked.connect(self.choose_directory)
+        toolbar.addWidget(btn_choose)
 
-        act_reload = QAction("Обновить", self)
-        act_reload.triggered.connect(self.reload_directory)
-        toolbar.addAction(act_reload)
+        btn_reload = QPushButton("Обновить", self)
+        btn_reload.clicked.connect(self.reload_directory)
+        toolbar.addWidget(btn_reload)
 
-        act_scan = QAction("Скан", self)
-        act_scan.triggered.connect(self._scan_catalog_now)
-        toolbar.addAction(act_scan)
+        btn_scan = QPushButton("Скан", self)
+        btn_scan.clicked.connect(self._scan_catalog_now)
+        toolbar.addWidget(btn_scan)
 
-        act_log = QAction("Лог каталога", self)
-        act_log.triggered.connect(self._open_catalog_dialog)
-        toolbar.addAction(act_log)
+        btn_log = QPushButton("Лог каталога", self)
+        btn_log.clicked.connect(self._open_catalog_dialog)
+        toolbar.addWidget(btn_log)
 
         toolbar.addSeparator()
 
-        self.action_show_catalog = QAction("Каталог", self)
-        self.action_show_catalog.triggered.connect(self._show_catalog_dock)
-        toolbar.addAction(self.action_show_catalog)
+        btn_catalog = QPushButton("Каталог", self)
+        btn_catalog.clicked.connect(self._show_catalog_dock)
+        toolbar.addWidget(btn_catalog)
 
-        self.action_show_settings = QAction("Настройки", self)
-        self.action_show_settings.triggered.connect(self._show_settings_dock)
-        toolbar.addAction(self.action_show_settings)
+        btn_settings = QPushButton("Настройки", self)
+        btn_settings.clicked.connect(self._show_settings_dock)
+        toolbar.addWidget(btn_settings)
 
-        act_layout = QAction("Сброс layout", self)
-        act_layout.triggered.connect(self._reset_workspace_layout)
-        toolbar.addAction(act_layout)
+        btn_layout = QPushButton("Сброс layout", self)
+        btn_layout.clicked.connect(self._reset_workspace_layout)
+        toolbar.addWidget(btn_layout)
         self.main_toolbar = toolbar
 
     def _init_catalog_dock(self):
@@ -462,7 +460,7 @@ class MainWindow(QMainWindow):
         theme_idx = self.theme_combo.findData(ui_theme)
         if theme_idx >= 0:
             self.theme_combo.setCurrentIndex(theme_idx)
-        self._apply_ui_theme(ui_theme)
+        apply_ui_theme(self, ui_theme)
 
         qcolor = QColor(bg_color_hex if bg_color_hex else "#14233f")
         if qcolor.isValid():
@@ -920,39 +918,9 @@ class MainWindow(QMainWindow):
 
     def _on_theme_changed(self):
         theme = self.theme_combo.currentData() or "graphite"
-        self._apply_ui_theme(theme)
+        apply_ui_theme(self, theme)
         if self._settings_ready:
             self.settings.setValue("view/ui_theme", theme)
-
-    def _apply_ui_theme(self, theme: str):
-        if theme == "light":
-            self.setStyleSheet("")
-            return
-        if theme == "dark":
-            self.setStyleSheet(
-                """
-                QWidget { background: #1e1f22; color: #e4e7eb; }
-                QLineEdit, QComboBox, QListWidget, QTreeWidget, QTabWidget::pane { background: #25272b; color: #e4e7eb; border: 1px solid #3a3d43; }
-                QPushButton { background: #2c2f35; border: 1px solid #454a52; padding: 5px 8px; }
-                QPushButton:hover { background: #353941; }
-                QSlider::groove:horizontal { background: #3a3d43; height: 6px; }
-                QSlider::handle:horizontal { background: #7da3ff; width: 12px; margin: -4px 0; border-radius: 5px; }
-                QToolBar { background: #1b1d20; border-bottom: 1px solid #3a3d43; }
-                """
-            )
-            return
-        # graphite
-        self.setStyleSheet(
-            """
-            QWidget { background: #2b2f36; color: #eceff4; }
-            QLineEdit, QComboBox, QListWidget, QTreeWidget, QTabWidget::pane { background: #323741; color: #eceff4; border: 1px solid #4a5362; }
-            QPushButton { background: #3a404c; border: 1px solid #586273; padding: 5px 8px; }
-            QPushButton:hover { background: #444b58; }
-            QSlider::groove:horizontal { background: #4a5362; height: 6px; }
-            QSlider::handle:horizontal { background: #86b6ff; width: 12px; margin: -4px 0; border-radius: 5px; }
-            QToolBar { background: #252a31; border-bottom: 1px solid #4a5362; }
-            """
-        )
 
     def _on_shadows_toggled(self, state: int):
         enabled = state == Qt.Checked
