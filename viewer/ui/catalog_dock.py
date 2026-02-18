@@ -134,7 +134,7 @@ class CatalogDockPanel(QWidget):
             item.setToolTip(rel_display)
             preview_path = preview_map.get(path, "")
             if preview_path and os.path.isfile(preview_path):
-                icon = QIcon(QPixmap(preview_path))
+                icon = self._build_icon(preview_path)
                 if not icon.isNull():
                     item.setIcon(icon)
             self.list_widget.addItem(item)
@@ -177,7 +177,7 @@ class CatalogDockPanel(QWidget):
             p = item.data(Qt.UserRole) or ""
             if os.path.normcase(os.path.normpath(p)) != norm:
                 continue
-            icon = QIcon(QPixmap(preview_path))
+            icon = self._build_icon(preview_path)
             if not icon.isNull():
                 item.setIcon(icon)
             break
@@ -216,6 +216,16 @@ class CatalogDockPanel(QWidget):
             self.category_combo.currentText(),
             self.only_favorites_checkbox.isChecked(),
         )
+
+    def _build_icon(self, preview_path: str):
+        pixmap = QPixmap(preview_path)
+        if pixmap.isNull():
+            return QIcon()
+        target = self.list_widget.thumb_size
+        # Force icon pixmap to current thumbnail size, so Ctrl+wheel resize
+        # updates visible card size immediately even for old small previews.
+        scaled = pixmap.scaled(target, target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        return QIcon(scaled)
 
     def _on_item_double_clicked(self, item):
         path = item.data(Qt.UserRole) or ""

@@ -488,7 +488,8 @@ class MainWindow(QMainWindow):
                     preview_path = ""
             if preview_path and os.path.isfile(preview_path):
                 self._preview_icon_cache[norm] = preview_path
-                icon = QIcon(QPixmap(preview_path))
+                pix = QPixmap(preview_path)
+                icon = QIcon(pix.scaled(self._thumb_size, self._thumb_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
                 if not icon.isNull():
                     item.setIcon(0, icon)
             cat_item.addChild(item)
@@ -1087,7 +1088,8 @@ class MainWindow(QMainWindow):
         if (not force) and os.path.isfile(expected_path):
             norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
             self._preview_icon_cache[norm] = expected_path
-            icon = QIcon(QPixmap(expected_path))
+            pix = QPixmap(expected_path)
+            icon = QIcon(pix.scaled(self._thumb_size, self._thumb_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             if not icon.isNull():
                 item = self._model_item_by_path.get(norm)
                 if item is not None:
@@ -1109,7 +1111,8 @@ class MainWindow(QMainWindow):
             return
         norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
         self._preview_icon_cache[norm] = preview_path
-        icon = QIcon(QPixmap(preview_path))
+        pix = QPixmap(preview_path)
+        icon = QIcon(pix.scaled(self._thumb_size, self._thumb_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         if icon.isNull():
             return
         item = self._model_item_by_path.get(norm)
