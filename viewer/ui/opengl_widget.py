@@ -119,6 +119,7 @@ varying vec2 vUv;
 varying vec4 vShadowCoord;
 
 uniform mat4 uLightVP;
+uniform mat4 uModelRot;
 uniform vec3 uModelOffset;
 
 void main() {
@@ -126,7 +127,8 @@ void main() {
     vPosView = posView.xyz;
     vNormalView = normalize(gl_NormalMatrix * gl_Normal);
     vUv = gl_MultiTexCoord0.xy;
-    vec4 worldPos = vec4(gl_Vertex.xyz + uModelOffset, 1.0);
+    vec3 modelPos = (uModelRot * vec4(gl_Vertex.xyz, 1.0)).xyz + uModelOffset;
+    vec4 worldPos = vec4(modelPos, 1.0);
     vShadowCoord = uLightVP * worldPos;
     gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
 }
@@ -289,10 +291,12 @@ void main() {
 VERTEX_SHADER_DEPTH_SRC = """
 #version 120
 uniform mat4 uLightVP;
+uniform mat4 uModelRot;
 uniform vec3 uModelOffset;
 
 void main() {
-    vec4 worldPos = vec4(gl_Vertex.xyz + uModelOffset, 1.0);
+    vec3 modelPos = (uModelRot * vec4(gl_Vertex.xyz, 1.0)).xyz + uModelOffset;
+    vec4 worldPos = vec4(modelPos, 1.0);
     gl_Position = uLightVP * worldPos;
 }
 """
@@ -609,14 +613,14 @@ class OpenGLWidget(QOpenGLWidget):
             camera_distance = max(0.3, (self.model_radius * 2.8) / max(self.zoom, 0.01))
         target_y = self.model_target_y + self.pan_y
         gluLookAt(self.pan_x, target_y, camera_distance, self.pan_x, target_y, 0, 0, 1, 0)
-        glRotatef(self.angle_x, 1, 0, 0)
-        glRotatef(self.angle_y, 0, 1, 0)
 
         if self.vertices.size == 0 or self.indices.size == 0 or self.shader_program is None:
             return
 
         glPushMatrix()
         self._apply_model_translation()
+        glRotatef(self.angle_x, 1, 0, 0)
+        glRotatef(self.angle_y, 0, 1, 0)
         glUseProgram(self.shader_program)
         try:
             self._set_common_uniforms()
@@ -653,6 +657,7 @@ class OpenGLWidget(QOpenGLWidget):
         self._set_vec3_uniform("uLightColor0", *key_color)
         self._set_vec3_uniform("uLightColor1", *fill_color)
         self._set_matrix_uniform("uLightVP", self._light_vp)
+        self._set_matrix_uniform("uModelRot", self._model_rotation_matrix())
         self._set_vec3_uniform("uModelOffset", *self.model_translate)
         texel = 1.0 / float(max(self.shadow_size, 1))
         self._set_int_uniform("uShadowEnabled", 1 if (self.enable_ground_shadow and self.shadow_depth_tex) else 0)
@@ -809,6 +814,7 @@ class OpenGLWidget(QOpenGLWidget):
         glUseProgram(self.depth_shader_program)
         try:
             self._set_matrix_uniform("uLightVP", self._light_vp, program=self.depth_shader_program)
+            self._set_matrix_uniform("uModelRot", self._model_rotation_matrix(), program=self.depth_shader_program)
             loc = glGetUniformLocation(self.depth_shader_program, "uModelOffset")
             if loc != -1:
                 glUniform3f(loc, float(self.model_translate[0]), float(self.model_translate[1]), float(self.model_translate[2]))
@@ -967,6 +973,32 @@ class OpenGLWidget(QOpenGLWidget):
         m[1, 3] = -np.dot(u, eye)
         m[2, 3] = np.dot(f, eye)
         return m
+
+    def _model_rotation_matrix(self):
+        ax = np.deg2rad(float(self.angle_x))
+        ay = np.deg2rad(float(self.angle_y))
+        cx, sx = np.cos(ax), np.sin(ax)
+        cy, sy = np.cos(ay), np.sin(ay)
+
+        rx = np.array(
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, cx, -sx, 0.0],
+                [0.0, sx, cx, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+        ry = np.array(
+            [
+                [cy, 0.0, sy, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [-sy, 0.0, cy, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+        return np.dot(rx, ry).astype(np.float32)
 
     def _ortho_matrix(self, left, right, bottom, top, near, far):
         m = np.identity(4, dtype=np.float32)
