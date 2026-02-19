@@ -656,14 +656,20 @@ class MainWindow(QMainWindow):
         self._start_async_model_load(row, file_path)
 
     def _current_selected_path(self):
+        tree_path = ""
+        item = self.model_list.currentItem()
+        if item is not None:
+            tree_path = item.data(0, Qt.UserRole) or ""
+        dock_path = ""
         if self.catalog_panel is not None:
             dock_path = self.catalog_panel.current_path()
-            if dock_path:
-                return dock_path
-        item = self.model_list.currentItem()
-        if item is None:
-            return self.current_file_path or ""
-        return item.data(0, Qt.UserRole) or self.current_file_path or ""
+        if self._batch_running and tree_path:
+            return tree_path
+        if dock_path:
+            return dock_path
+        if tree_path:
+            return tree_path
+        return self.current_file_path or ""
 
     def _current_model_index(self):
         path = self._current_selected_path()
@@ -682,10 +688,10 @@ class MainWindow(QMainWindow):
         item = self._model_item_by_path.get(norm)
         if item is None:
             return
-        self.model_list.setCurrentItem(item)
-        self.model_list.scrollToItem(item)
         if self.catalog_panel is not None:
             self.catalog_panel.set_current_path(path)
+        self.model_list.setCurrentItem(item)
+        self.model_list.scrollToItem(item)
 
     def _open_model_by_path(self, path: str):
         if not path:
@@ -708,6 +714,12 @@ class MainWindow(QMainWindow):
         self._select_model_by_index(idx)
 
     def on_selection_changed(self):
+        if self.catalog_panel is not None:
+            item = self.model_list.currentItem()
+            if item is not None:
+                path = item.data(0, Qt.UserRole) or ""
+                if path:
+                    self.catalog_panel.set_current_path(path)
         row = self._current_model_index()
         self._update_favorite_button_for_current()
         self._load_model_at_row(row)
@@ -1029,6 +1041,8 @@ class MainWindow(QMainWindow):
 
         if not loaded:
             self._set_status_text(f"Ошибка: {self.gl_widget.last_error}")
+            if self._batch_running:
+                self._advance_batch_after_item()
             return
 
         self.current_file_path = file_path
@@ -1450,6 +1464,8 @@ class MainWindow(QMainWindow):
         pix = QPixmap(preview_path)
         icon = QIcon(pix.scaled(self._thumb_size, self._thumb_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         if icon.isNull():
+            if should_advance_batch and not advanced:
+                self._advance_batch_after_item()
             return
         item = self._model_item_by_path.get(norm)
         if item is not None:
@@ -1593,3 +1609,4 @@ class MainWindow(QMainWindow):
             QMessageBox.No,
         )
         return answer == QMessageBox.Yes
+
