@@ -376,8 +376,7 @@ class OpenGLWidget(QOpenGLWidget):
         self.model_center = np.array([0.0, 0.0, 0.0], dtype=np.float32)
         self.model_translate = np.array([0.0, 0.0, 0.0], dtype=np.float32)
         self.model_target_y = 0.0
-        self.pan_x = 0.0
-        self.pan_y = 0.0
+        self.pan_offset = np.array([0.0, 0.0, 0.0], dtype=np.float32)
         self._orbit_vel_x = 0.0
         self._orbit_vel_y = 0.0
         self._inertia_damping = 0.92
@@ -622,8 +621,7 @@ class OpenGLWidget(QOpenGLWidget):
             camera_distance = max(0.3, self.model_radius * 2.2)
         else:
             camera_distance = max(0.3, (self.model_radius * 2.8) / max(self.zoom, 0.01))
-        target_y = self.model_target_y + self.pan_y
-        eye, target = self._camera_eye_and_target(camera_distance, target_y)
+        eye, target = self._camera_eye_and_target(camera_distance)
         self._view_matrix = self._look_at_matrix(
             eye,
             target,
@@ -1024,8 +1022,8 @@ class OpenGLWidget(QOpenGLWidget):
     def _model_rotation_matrix(self):
         return np.identity(4, dtype=np.float32)
 
-    def _camera_eye_and_target(self, camera_distance: float, target_y: float):
-        target = np.array([self.pan_x, target_y, 0.0], dtype=np.float32)
+    def _camera_eye_and_target(self, camera_distance: float):
+        target = np.array([0.0, self.model_target_y, 0.0], dtype=np.float32) + self.pan_offset
         pitch = np.deg2rad(float(self.angle_x))
         yaw = np.deg2rad(float(self.angle_y))
         dir_vec = np.array(
@@ -1038,6 +1036,27 @@ class OpenGLWidget(QOpenGLWidget):
         )
         eye = target + dir_vec * float(camera_distance)
         return eye, target
+
+    def _camera_basis_vectors(self):
+        pitch = np.deg2rad(float(self.angle_x))
+        yaw = np.deg2rad(float(self.angle_y))
+        dir_vec = np.array(
+            [
+                np.sin(yaw) * np.cos(pitch),
+                np.sin(pitch),
+                np.cos(yaw) * np.cos(pitch),
+            ],
+            dtype=np.float32,
+        )
+        forward = -self._normalize_vec3(dir_vec)
+        world_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        right = np.cross(forward, world_up)
+        if np.linalg.norm(right) < 1e-6:
+            right = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        else:
+            right = self._normalize_vec3(right)
+        up = self._normalize_vec3(np.cross(right, forward))
+        return right, up
 
     def _effective_light_positions_world(self):
         target = np.array([0.0, self.model_target_y, 0.0], dtype=np.float32)
@@ -1112,8 +1131,8 @@ class OpenGLWidget(QOpenGLWidget):
             dy = event.y() - self.last_mouse_pos.y()
             rot_scale = self.rotate_speed * accel
             self.angle_x = max(-89.0, min(89.0, self.angle_x + dy * rot_scale))
-            self.angle_y = (self.angle_y + dx * rot_scale) % 360.0
-            self._orbit_vel_x = dx * rot_scale * 0.12
+            self.angle_y = (self.angle_y - dx * rot_scale) % 360.0
+            self._orbit_vel_x = -dx * rot_scale * 0.12
             self._orbit_vel_y = dy * rot_scale * 0.12
             self.last_mouse_pos = event.pos()
             self.update()
@@ -1125,8 +1144,9 @@ class OpenGLWidget(QOpenGLWidget):
             pan_scale = (self.model_radius * 1.3) / max(min(self.width(), self.height()), 1)
             pan_scale /= max(self.zoom, 0.05)
             pan_scale *= accel
-            self.pan_x -= dx * pan_scale
-            self.pan_y += dy * pan_scale
+            right, up = self._camera_basis_vectors()
+            move = (-dx * pan_scale) * right + (dy * pan_scale) * up
+            self.pan_offset = (self.pan_offset + move.astype(np.float32)).astype(np.float32)
             self.last_mouse_pos = event.pos()
             self.update()
             return
@@ -1154,8 +1174,7 @@ class OpenGLWidget(QOpenGLWidget):
 
     def fit_model(self):
         self.zoom = 1.0
-        self.pan_x = 0.0
-        self.pan_y = 0.0
+        self.pan_offset = np.array([0.0, 0.0, 0.0], dtype=np.float32)
         self._request_projection_refresh()
         self.update()
 
@@ -1163,8 +1182,7 @@ class OpenGLWidget(QOpenGLWidget):
         self.angle_x = 0.0
         self.angle_y = 0.0
         self.zoom = 1.0
-        self.pan_x = 0.0
-        self.pan_y = 0.0
+        self.pan_offset = np.array([0.0, 0.0, 0.0], dtype=np.float32)
         self.projection_mode = "perspective"
         self._inertia_timer.stop()
         self._orbit_vel_x = 0.0
