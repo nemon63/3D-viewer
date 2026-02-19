@@ -52,6 +52,7 @@ from OpenGL.GL import (
     glDeleteTextures,
     glDisable,
     glDisableClientState,
+    glDepthMask,
     glDrawElements,
     glDrawBuffer,
     glEnable,
@@ -157,7 +158,7 @@ uniform int uHasMetal;
 uniform int uHasRough;
 uniform int uHasNormal;
 uniform int uUnlitTexturePreview;
-uniform int uUseAlphaCutout;
+uniform int uAlphaMode;
 uniform float uAlphaCutoff;
 uniform float uAmbientStrength;
 uniform int uFastMode;
@@ -246,7 +247,7 @@ void main() {
     vec3 base = baseSample.rgb;
     float alpha = baseSample.a;
 
-    if (uUseAlphaCutout == 1 && alpha < uAlphaCutoff) {
+    if (uAlphaMode == 1 && alpha < uAlphaCutoff) {
         discard;
     }
     float metallic = (uHasMetal == 1) ? texture2D(uMetalTex, vUv).r : 0.0;
@@ -435,6 +436,7 @@ class OpenGLWidget(QOpenGLWidget):
         self.shadow_bias = 0.0012
         self.shadow_softness = 1.0
         self.directional_light_energy = 0.12
+        self.alpha_render_mode = "cutout"
         self._view_matrix = np.identity(4, dtype=np.float32)
 
         self._inertia_timer = QTimer(self)
@@ -647,14 +649,35 @@ class OpenGLWidget(QOpenGLWidget):
         glUseProgram(self.shader_program)
         try:
             self._set_common_uniforms()
+            draw_entries = []
             if self.submeshes:
                 for submesh in self.submeshes:
                     tex_ids, has_alpha = self._resolve_submesh_textures(submesh)
-                    self._set_material_uniforms(tex_ids, has_alpha)
-                    self._draw_mesh_indices(submesh["indices"])
+                    draw_entries.append((submesh["indices"], tex_ids, has_alpha))
             else:
-                self._set_material_uniforms(self.texture_ids, self.base_texture_has_alpha)
-                self._draw_mesh_indices(self.indices)
+                draw_entries.append((self.indices, self.texture_ids, self.base_texture_has_alpha))
+
+            if self.alpha_render_mode == "blend":
+                opaque_entries = [item for item in draw_entries if not item[2]]
+                transparent_entries = [item for item in draw_entries if item[2]]
+
+                for draw_indices, tex_ids, has_alpha in opaque_entries:
+                    self._set_material_uniforms(tex_ids, has_alpha)
+                    self._draw_mesh_indices(draw_indices)
+
+                if transparent_entries:
+                    glEnable(GL_BLEND)
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+                    glDepthMask(False)
+                    for draw_indices, tex_ids, has_alpha in transparent_entries:
+                        self._set_material_uniforms(tex_ids, has_alpha)
+                        self._draw_mesh_indices(draw_indices)
+                    glDepthMask(True)
+                    glDisable(GL_BLEND)
+            else:
+                for draw_indices, tex_ids, has_alpha in draw_entries:
+                    self._set_material_uniforms(tex_ids, has_alpha)
+                    self._draw_mesh_indices(draw_indices)
         finally:
             self._unbind_texture_units()
             glUseProgram(0)
@@ -717,7 +740,13 @@ class OpenGLWidget(QOpenGLWidget):
         self._set_int_uniform("uHasMetal", 1 if metal_tex else 0)
         self._set_int_uniform("uHasRough", 1 if rough_tex else 0)
         self._set_int_uniform("uHasNormal", 1 if normal_tex else 0)
-        self._set_int_uniform("uUseAlphaCutout", 1 if has_base_alpha else 0)
+        alpha_mode = 0
+        if has_base_alpha:
+            if self.alpha_render_mode == "blend":
+                alpha_mode = 2
+            elif self.alpha_render_mode == "cutout":
+                alpha_mode = 1
+        self._set_int_uniform("uAlphaMode", alpha_mode)
 
     def _draw_mesh_indices(self, draw_indices):
         draw_indices = np.asarray(draw_indices, dtype=np.uint32).reshape(-1)
@@ -1277,6 +1306,12 @@ class OpenGLWidget(QOpenGLWidget):
 
     def set_alpha_cutoff(self, value: float):
         self.alpha_cutoff = min(max(value, 0.0), 1.0)
+        self.update()
+
+    def set_alpha_render_mode(self, mode: str):
+        if mode not in ("cutout", "blend"):
+            mode = "cutout"
+        self.alpha_render_mode = mode
         self.update()
 
     def _request_projection_refresh(self):

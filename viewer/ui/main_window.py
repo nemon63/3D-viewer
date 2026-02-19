@@ -231,6 +231,11 @@ class MainWindow(QMainWindow):
         self.alpha_cutoff_slider.setValue(50)
         self.alpha_cutoff_slider.valueChanged.connect(self._on_alpha_cutoff_changed)
         material_layout.addRow("Alpha Cutoff", self.alpha_cutoff_slider)
+        self.alpha_mode_combo = QComboBox(self)
+        self.alpha_mode_combo.addItem("Cutout", "cutout")
+        self.alpha_mode_combo.addItem("Alpha Blend", "blend")
+        self.alpha_mode_combo.currentIndexChanged.connect(self._on_alpha_mode_changed)
+        material_layout.addRow("Alpha Mode", self.alpha_mode_combo)
         material_layout.addRow("Значение", self.alpha_cutoff_label)
         controls_tabs.addTab(material_group, "Материалы")
 
@@ -407,6 +412,7 @@ class MainWindow(QMainWindow):
         self._init_settings_dock()
 
         self._on_alpha_cutoff_changed(self.alpha_cutoff_slider.value())
+        self._on_alpha_mode_changed(self.alpha_mode_combo.currentIndex())
         self._on_rotate_speed_changed(self.rotate_speed_slider.value())
         self._on_zoom_speed_changed(self.zoom_speed_slider.value())
         self._on_ambient_changed(self.ambient_slider.value())
@@ -522,6 +528,8 @@ class MainWindow(QMainWindow):
         shadow_opacity = self.settings.value("view/shadow_opacity_slider", 42, type=int)
         shadow_bias = self.settings.value("view/shadow_bias_slider", 12, type=int)
         shadow_softness = self.settings.value("view/shadow_softness_slider", 100, type=int)
+        alpha_cutoff = self.settings.value("view/alpha_cutoff_slider", 50, type=int)
+        alpha_mode = self.settings.value("view/alpha_mode", "cutout", type=str)
         ui_theme = self.settings.value("view/ui_theme", "graphite", type=str)
         bg_color_hex = self.settings.value("view/bg_color_hex", "#14233f", type=str)
         projection = self.settings.value("view/projection_mode", "perspective", type=str)
@@ -545,6 +553,11 @@ class MainWindow(QMainWindow):
         self.shadow_opacity_slider.setValue(max(self.shadow_opacity_slider.minimum(), min(self.shadow_opacity_slider.maximum(), shadow_opacity)))
         self.shadow_bias_slider.setValue(max(self.shadow_bias_slider.minimum(), min(self.shadow_bias_slider.maximum(), shadow_bias)))
         self.shadow_softness_slider.setValue(max(self.shadow_softness_slider.minimum(), min(self.shadow_softness_slider.maximum(), shadow_softness)))
+        self.alpha_cutoff_slider.setValue(max(self.alpha_cutoff_slider.minimum(), min(self.alpha_cutoff_slider.maximum(), alpha_cutoff)))
+
+        alpha_mode_idx = self.alpha_mode_combo.findData(alpha_mode)
+        if alpha_mode_idx >= 0:
+            self.alpha_mode_combo.setCurrentIndex(alpha_mode_idx)
 
         theme_idx = self.theme_combo.findData(ui_theme)
         if theme_idx >= 0:
@@ -944,6 +957,17 @@ class MainWindow(QMainWindow):
         cutoff = value / 100.0
         self.alpha_cutoff_label.setText(f"{cutoff:.2f}")
         self.gl_widget.set_alpha_cutoff(cutoff)
+        if self._settings_ready:
+            self.settings.setValue("view/alpha_cutoff_slider", int(value))
+
+    def _on_alpha_mode_changed(self, _value: int):
+        mode = self.alpha_mode_combo.currentData() or "cutout"
+        self.gl_widget.set_alpha_render_mode(mode)
+        is_cutout = mode == "cutout"
+        self.alpha_cutoff_slider.setEnabled(is_cutout)
+        self.alpha_cutoff_label.setEnabled(is_cutout)
+        if self._settings_ready:
+            self.settings.setValue("view/alpha_mode", mode)
 
     def _on_projection_changed(self):
         mode = self.projection_combo.currentData()
