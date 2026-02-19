@@ -349,6 +349,9 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
     t_parse_start = time.perf_counter()
     try:
         model_dir = os.path.dirname(file_path)
+        pre_material_texture_candidates = _collect_fbx_material_textures(scene, file_path)
+        pre_fs_texture_candidates = find_texture_candidates(file_path)
+        has_potential_textures = bool(pre_material_texture_candidates or pre_fs_texture_candidates)
         (
             vertices_raw,
             indices_raw,
@@ -357,7 +360,7 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
             fbx_debug,
             submesh_groups,
             material_textures,
-        ) = _parse_fbx_scene(scene, model_dir=model_dir)
+        ) = _parse_fbx_scene(scene, model_dir=model_dir, collect_uv=has_potential_textures)
         t_parse_done = time.perf_counter()
         vertices, indices, normals = process_mesh_data(
             vertices_raw,
@@ -399,9 +402,9 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
                 texture_candidates.extend(paths)
 
         if not texture_candidates:
-            texture_candidates = _collect_fbx_material_textures(scene, file_path)
+            texture_candidates = list(pre_material_texture_candidates)
         if not texture_candidates:
-            texture_candidates = find_texture_candidates(file_path)
+            texture_candidates = list(pre_fs_texture_candidates)
         texture_candidates = rank_texture_candidates(texture_candidates, model_name=os.path.splitext(os.path.basename(file_path))[0].lower())
         texture_sets = group_texture_candidates(texture_candidates)
         if not texture_sets.get(CHANNEL_BASECOLOR):
@@ -449,6 +452,7 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
                 "timing_process_sec": round(float(t_process_done - t_parse_done), 4),
                 "timing_texture_sec": round(float(t_textures_done - t_process_done), 4),
                 "timing_total_sec": round(float(t_textures_done - t_import_start), 4),
+                "uv_parse_enabled": bool(has_potential_textures),
                 **fbx_debug,
             },
         )
@@ -456,7 +460,7 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
         manager.Destroy()
 
 
-def _parse_fbx_scene(scene, model_dir: str):
+def _parse_fbx_scene(scene, model_dir: str, collect_uv: bool = True):
     vertices = []
     indices = []
     normals = []
@@ -482,17 +486,16 @@ def _parse_fbx_scene(scene, model_dir: str):
         mesh = node.GetMesh()
         mesh_count += 1
         control_points = mesh.GetControlPoints()
-        uv_set_name = _get_fbx_uv_set_name(mesh)
+        uv_set_name = _get_fbx_uv_set_name(mesh) if collect_uv else None
         poly_count = int(mesh.GetPolygonCount())
         polygon_sizes = [int(mesh.GetPolygonSize(j)) for j in range(poly_count)]
-        uv_resolver = _build_fbx_uv_resolver(mesh, polygon_sizes, uv_set_name)
+        uv_resolver = _build_fbx_uv_resolver(mesh, polygon_sizes, uv_set_name) if collect_uv else None
         polygon_materials = _get_polygon_material_indices(mesh)
         is_multi_material = _mesh_uses_multiple_materials(node, polygon_materials)
         if is_multi_material:
             multi_material_mesh_count += 1
         if first_uv_set is None:
             first_uv_set = uv_set_name
-        cp_normals = None
         object_name = str(node.GetName() or f"node_{i}")
         material_group_by_index = {}
 
@@ -571,11 +574,6 @@ def _parse_fbx_scene(scene, model_dir: str):
                     cp = control_points[cp_index]
                     normal = _get_fbx_vertex_normal(mesh, j, slot)
                     if normal is None:
-                        if cp_normals is None:
-                            cp_normals = _compute_smooth_control_point_normals(mesh, control_points)
-                        if cp_index < len(cp_normals):
-                            normal = cp_normals[cp_index]
-                    if normal is None:
                         if face_normal is None:
                             face_normal = _compute_triangle_face_normal_from_control_points(
                                 control_points,
@@ -585,16 +583,19 @@ def _parse_fbx_scene(scene, model_dir: str):
                             )
                         normal = face_normal
 
-                    uv = uv_resolver(j, slot, cp_index) if uv_resolver is not None else None
-                    if uv is None:
-                        uv = (0.0, 0.0)
-                        uv_missing_count += 1
-                    else:
-                        uv_found_count += 1
+                    uv = None
+                    if collect_uv:
+                        uv = uv_resolver(j, slot, cp_index) if uv_resolver is not None else None
+                        if uv is None:
+                            uv = (0.0, 0.0)
+                            uv_missing_count += 1
+                        else:
+                            uv_found_count += 1
 
                     vertices.append([float(cp[0]), float(cp[1]), float(cp[2])])
                     normals.append([float(normal[0]), float(normal[1]), float(normal[2])])
-                    texcoords.append([float(uv[0]), float(uv[1])])
+                    if collect_uv:
+                        texcoords.append([float(uv[0]), float(uv[1])])
                     vert_index = len(vertices) - 1
                     indices.append(vert_index)
                     target_group["indices"].append(vert_index)
