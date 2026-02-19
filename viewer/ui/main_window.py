@@ -40,6 +40,11 @@ from viewer.services.catalog_db import (
     init_catalog_db,
     set_asset_favorite,
 )
+from viewer.services.pipeline_validation import (
+    evaluate_pipeline_coverage,
+    load_profiles_config,
+    run_validation_checks,
+)
 from viewer.services.preview_cache import build_preview_path_for_model, get_preview_cache_dir, save_viewport_preview
 
 
@@ -95,6 +100,9 @@ class MainWindow(QMainWindow):
         self._batch_paths = []
         self._batch_index = 0
         self._batch_current_path = ""
+        self.profile_config, self.profile_config_error = load_profiles_config()
+        self.pipeline_coverage_rows = []
+        self.validation_rows = []
         self.init_ui()
         self._register_shortcuts()
         self._restore_view_settings()
@@ -407,6 +415,7 @@ class MainWindow(QMainWindow):
         light_layout.addRow(reset_light_settings_button)
 
         controls_tabs.addTab(light_group, "Свет")
+        self._build_validation_tab(controls_tabs)
         self.controls_tabs = controls_tabs
 
         root_layout.addWidget(self.gl_widget, stretch=1)
@@ -432,6 +441,7 @@ class MainWindow(QMainWindow):
         self._on_shadow_bias_changed(self.shadow_bias_slider.value())
         self._on_shadow_softness_changed(self.shadow_softness_slider.value())
         self._on_shadows_toggled(Qt.Unchecked)
+        self._refresh_validation_data()
         self.statusBar().showMessage("Готово")
 
     def _init_main_toolbar(self):
@@ -505,7 +515,7 @@ class MainWindow(QMainWindow):
         self._update_batch_ui()
 
     def _init_settings_dock(self):
-        dock = QDockWidget("Настройки (материал/камера/свет)", self)
+        dock = QDockWidget("Настройки (материал/камера/свет/валидация)", self)
         dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         dock.setFeatures(
             QDockWidget.DockWidgetMovable
@@ -516,6 +526,182 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
         dock.setFloating(False)
         self.settings_dock = dock
+
+    def _build_validation_tab(self, controls_tabs: QTabWidget):
+        validation_group = QGroupBox("Validation", self)
+        layout = QVBoxLayout(validation_group)
+
+        filters = QHBoxLayout()
+        self.validation_pipeline_combo = QComboBox(self)
+        self.validation_pipeline_combo.addItem("All pipelines", "all")
+        for code in sorted((self.profile_config.get("pipelines") or {}).keys()):
+            self.validation_pipeline_combo.addItem(code, code)
+        self.validation_pipeline_combo.currentIndexChanged.connect(self._render_validation_panel)
+
+        self.validation_status_combo = QComboBox(self)
+        self.validation_status_combo.addItem("All statuses", "all")
+        self.validation_status_combo.addItem("ready", "ready")
+        self.validation_status_combo.addItem("partial", "partial")
+        self.validation_status_combo.addItem("missing", "missing")
+        self.validation_status_combo.currentIndexChanged.connect(self._render_validation_panel)
+
+        self.validation_severity_combo = QComboBox(self)
+        self.validation_severity_combo.addItem("All severities", "all")
+        self.validation_severity_combo.addItem("info", "info")
+        self.validation_severity_combo.addItem("warn", "warn")
+        self.validation_severity_combo.addItem("error", "error")
+        self.validation_severity_combo.currentIndexChanged.connect(self._render_validation_panel)
+
+        refresh_btn = QPushButton("Refresh", self)
+        refresh_btn.clicked.connect(self._refresh_validation_data)
+
+        filters.addWidget(QLabel("Pipeline", self))
+        filters.addWidget(self.validation_pipeline_combo)
+        filters.addWidget(QLabel("Coverage", self))
+        filters.addWidget(self.validation_status_combo)
+        filters.addWidget(QLabel("Severity", self))
+        filters.addWidget(self.validation_severity_combo)
+        filters.addStretch(1)
+        filters.addWidget(refresh_btn)
+        layout.addLayout(filters)
+
+        self.validation_summary_label = QLabel("Validation: no data", self)
+        self.validation_summary_label.setWordWrap(True)
+        layout.addWidget(self.validation_summary_label)
+
+        self.validation_coverage_tree = QTreeWidget(self)
+        self.validation_coverage_tree.setRootIsDecorated(False)
+        self.validation_coverage_tree.setAlternatingRowColors(True)
+        self.validation_coverage_tree.setColumnCount(4)
+        self.validation_coverage_tree.setHeaderLabels(["Pipeline", "Status", "Required", "Missing"])
+        layout.addWidget(self.validation_coverage_tree, stretch=1)
+
+        self.validation_results_tree = QTreeWidget(self)
+        self.validation_results_tree.setRootIsDecorated(False)
+        self.validation_results_tree.setAlternatingRowColors(True)
+        self.validation_results_tree.setColumnCount(4)
+        self.validation_results_tree.setHeaderLabels(["Severity", "Pipeline", "Rule", "Message"])
+        layout.addWidget(self.validation_results_tree, stretch=2)
+
+        controls_tabs.addTab(validation_group, "Validation")
+
+    def _refresh_validation_data(self, file_path: str = ""):
+        if not hasattr(self, "validation_summary_label"):
+            return
+        active_path = file_path or self.current_file_path or self._current_selected_path() or ""
+        if not active_path:
+            self.pipeline_coverage_rows = []
+            self.validation_rows = []
+            if self.profile_config_error:
+                self.validation_rows = [
+                    {
+                        "severity": "error",
+                        "pipeline": "global",
+                        "rule_code": "profiles.load",
+                        "message": f"profiles.yaml parse error: {self.profile_config_error}",
+                    }
+                ]
+            self._render_validation_panel()
+            return
+
+        texture_paths = dict(self.gl_widget.last_texture_paths or {})
+        texture_sets = dict(self.gl_widget.last_texture_sets or {})
+        debug = self.gl_widget.last_debug_info or {}
+        triangles = int(self.gl_widget.indices.size // 3) if self.gl_widget.indices.size else 0
+
+        self.pipeline_coverage_rows = evaluate_pipeline_coverage(
+            self.profile_config,
+            texture_paths,
+            texture_sets,
+        )
+        self.validation_rows = run_validation_checks(
+            self.profile_config,
+            active_path,
+            debug,
+            texture_paths,
+            texture_sets,
+            triangles,
+            self.pipeline_coverage_rows,
+        )
+        if self.profile_config_error:
+            self.validation_rows.insert(
+                0,
+                {
+                    "severity": "error",
+                    "pipeline": "global",
+                    "rule_code": "profiles.load",
+                    "message": f"profiles.yaml parse error: {self.profile_config_error}",
+                },
+            )
+        self._render_validation_panel()
+
+    def _render_validation_panel(self):
+        if not hasattr(self, "validation_summary_label"):
+            return
+
+        pipeline_filter = self.validation_pipeline_combo.currentData() or "all"
+        status_filter = self.validation_status_combo.currentData() or "all"
+        severity_filter = self.validation_severity_combo.currentData() or "all"
+
+        self.validation_coverage_tree.clear()
+        status_counts = {"ready": 0, "partial": 0, "missing": 0}
+        pipelines_by_status = {"ready": set(), "partial": set(), "missing": set()}
+        for row in self.pipeline_coverage_rows:
+            status = row.get("status") or "missing"
+            if status in status_counts:
+                status_counts[status] += 1
+                pipelines_by_status[status].add(row.get("pipeline") or "")
+            if pipeline_filter != "all" and row.get("pipeline") != pipeline_filter:
+                continue
+            if status_filter != "all" and status != status_filter:
+                continue
+            missing = row.get("missing") or []
+            required = row.get("required") or []
+            required_text = f"{int(row.get('ready_required', 0))}/{len(required)}"
+            item = QTreeWidgetItem(
+                [
+                    str(row.get("pipeline") or ""),
+                    str(status),
+                    required_text,
+                    ", ".join(missing) if missing else "-",
+                ]
+            )
+            self.validation_coverage_tree.addTopLevelItem(item)
+
+        allowed_by_status = None
+        if status_filter != "all":
+            allowed_by_status = pipelines_by_status.get(status_filter, set())
+
+        self.validation_results_tree.clear()
+        severity_counts = {"info": 0, "warn": 0, "error": 0}
+        for row in self.validation_rows:
+            sev = str(row.get("severity") or "info")
+            if sev in severity_counts:
+                severity_counts[sev] += 1
+            pipe = str(row.get("pipeline") or "global")
+            if pipeline_filter != "all" and pipe not in ("global", pipeline_filter):
+                continue
+            if severity_filter != "all" and sev != severity_filter:
+                continue
+            if allowed_by_status is not None and pipe not in ("global", "") and pipe not in allowed_by_status:
+                continue
+            item = QTreeWidgetItem(
+                [
+                    sev,
+                    pipe,
+                    str(row.get("rule_code") or ""),
+                    str(row.get("message") or ""),
+                ]
+            )
+            self.validation_results_tree.addTopLevelItem(item)
+
+        summary = (
+            f"Pipelines ready/partial/missing: {status_counts['ready']}/{status_counts['partial']}/{status_counts['missing']} | "
+            f"Results info/warn/error: {severity_counts['info']}/{severity_counts['warn']}/{severity_counts['error']}"
+        )
+        if self.profile_config_error:
+            summary += f" | profiles.yaml: {self.profile_config_error}"
+        self.validation_summary_label.setText(summary)
 
     def _restore_view_settings(self):
         rotate_speed = self.settings.value("view/rotate_speed_slider", 100, type=int)
@@ -614,6 +800,8 @@ class MainWindow(QMainWindow):
         self._update_batch_ui()
 
         if not self.filtered_model_files:
+            self.current_file_path = ""
+            self._refresh_validation_data()
             self._set_status_text("В выбранной папке нет поддерживаемых моделей.")
             return
 
@@ -943,6 +1131,7 @@ class MainWindow(QMainWindow):
             self.gl_widget.apply_texture_path("basecolor", path)
             self._update_status(self._current_model_index())
             self._refresh_overlay_data()
+            self._refresh_validation_data()
 
     def _apply_channel_texture(self, channel):
         combo = self.material_boxes.get(channel)
@@ -951,6 +1140,7 @@ class MainWindow(QMainWindow):
         path = combo.currentData()
         self.gl_widget.apply_texture_path(channel, path or "")
         self._update_status(self._current_model_index())
+        self._refresh_validation_data()
 
     def _refresh_overlay_data(self, file_path: str = ""):
         active_path = file_path or self.current_file_path or self._current_selected_path() or ""
@@ -1259,6 +1449,7 @@ class MainWindow(QMainWindow):
         self._update_favorite_button_for_current()
         self._populate_material_controls(self.gl_widget.last_texture_sets)
         self._refresh_overlay_data(file_path)
+        self._refresh_validation_data(file_path)
         self._update_status(row)
         self.setWindowTitle(f"3D Viewer - {os.path.basename(file_path)}")
         if file_path:
@@ -1279,6 +1470,7 @@ class MainWindow(QMainWindow):
         self.prev_button.setEnabled(True)
         self.next_button.setEnabled(True)
         self._set_status_text(f"Ошибка загрузки: {error_text}")
+        self._refresh_validation_data()
         if self._batch_running:
             self._advance_batch_after_item()
 
@@ -1579,6 +1771,8 @@ class MainWindow(QMainWindow):
                 pass
 
         if not self.filtered_model_files:
+            self.current_file_path = ""
+            self._refresh_validation_data()
             self.favorite_toggle_button.setText("☆")
             self._set_status_text("Нет моделей по текущему фильтру.")
             self._append_index_status()

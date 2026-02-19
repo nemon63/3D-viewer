@@ -6,25 +6,25 @@
 3. Events (`new/updated/removed`) logging.
 
 ## Phase 2: Catalog UX
-Status: 2/3 complete.
+Status: 3/3 complete (MVP).
 1. [x] List with search, date filter, favorites, categories.
 2. [x] Preview cache generation (thumb/cardsheet).
-3. [ ] Model card with metadata (polycount, UV, textures).
-3.1 UX format: in-viewport overlay in 3D window, toggle by `F`.
-3.2 Overlay content: file name, object/material counts, poly/tri counts, vertex count, UV set count, UV coverage, texture channels and resolved paths.
+3. [x] Model card with metadata (MVP format: in-viewport overlay in 3D window).
+3.1 UX format: overlay in 3D viewport, toggle by `F1`.
+3.2 Overlay content: file name, object/material/submesh counts, vertex/triangle counts, UV count, texture candidate count, selected channel textures, alpha/projection/shadow state.
 3.3 Data source: `payload.debug_info` + `submeshes` + current channel assignments from UI.
-3.4 States: hidden by default, visible after `F`, auto-refresh on model load/material override/render mode switch.
-3.5 Performance: no blocking IO in paint loop; preformat text on model-load event; cached strings for overlay render.
+3.4 States: hidden by default; auto-refresh on model load and material/channel changes.
+3.5 Performance: no blocking IO in render path; overlay text is prebuilt from current state.
 3.6 Implementation:
-3.6.1 Add `overlay_visible` and `overlay_text_lines` to `OpenGLWidget`.
-3.6.2 Add `set_overlay_data(dict)` and `toggle_overlay()` API.
-3.6.3 Add `QShortcut(Qt.Key_F, self)` in `MainWindow` and connect to `gl_widget.toggle_overlay`.
-3.6.4 Build overlay payload in `_on_model_loaded` from model debug + texture bindings.
-3.6.5 Draw overlay in `paintGL()` using `QPainter` after 3D pass.
+3.6.1 `OpenGLWidget`: `overlay_visible`, `overlay_lines`.
+3.6.2 `OpenGLWidget` API: `set_overlay_lines(lines)`, `set_overlay_visible(visible)`, `toggle_overlay()`.
+3.6.3 `MainWindow`: `QShortcut(Qt.Key_F1, self)` for toggle.
+3.6.4 `MainWindow`: `_refresh_overlay_data()` builds and pushes overlay text lines.
+3.6.5 Overlay rendering path: UI-layer overlay widget above 3D viewport (no changes to shadow pipeline).
 3.7 Acceptance:
-3.7.1 Pressing `F` toggles overlay instantly without frame hitch.
-3.7.2 Large FBX shows metadata within 100 ms after model appears.
-3.7.3 Overlay values match model debug log and selected textures in controls.
+3.7.1 Pressing `F1` toggles overlay instantly.
+3.7.2 Overlay values update after model load and material reassignment.
+3.7.3 Overlay values match debug info and selected textures.
 
 ## Phase 3: Pipelines + Validation
 1. Parse rules from `docs/profiles.yaml`.
@@ -49,46 +49,46 @@ Status: 2/3 complete.
 # План реализации (MVP)
 
 ## Этап 1: Основа
-1. Инициализация базы данных из файла `docs/schema_v1.sql`.
-2. Сканер/индексатор файлов (постепенная обработка в фоновом потоке).
-3. Логирование событий (`создание/обновление/удаление`).
+1. Инициализация базы данных из `docs/schema_v1.sql`.
+2. Сканер/индексатор файлов (инкрементально, в фоновом потоке).
+3. Логирование событий (`new/updated/removed`).
 
-## Этап 2: Пользовательский интерфейс каталога
-Статус: 2/3 выполнено.
-1. [x] Список с поиском, фильтром по дате, избранным элементам и категориям.
+## Этап 2: UX каталога
+Статус: 3/3 выполнено (MVP).
+1. [x] Список с поиском, фильтром по дате, избранным и категориями.
 2. [x] Генерация кэша предпросмотра (миниатюры/карточки).
-3. [ ] Карточка модели с метаданными (количество полигонов, UV-развёртка, текстуры).
-3.1 Формат UX: оверлей в окне 3D, переключение по клавише `F1`.
-3.2 Содержимое оверлея: имя файла, число объектов/материалов, poly/tri count, число вершин, число UV-сетов, покрытие UV, каналы текстур и выбранные пути.
+3. [x] Карточка модели с метаданными (MVP-формат: оверлей в окне 3D).
+3.1 Формат UX: оверлей в 3D viewport, переключение по `F1`.
+3.2 Содержимое оверлея: имя файла, число объектов/материалов/сабмешей, число вершин/треугольников, UV count, число кандидатов текстур, выбранные текстуры по каналам, состояние alpha/projection/shadow.
 3.3 Источник данных: `payload.debug_info` + `submeshes` + текущие назначения каналов из UI.
-3.4 Состояния: по умолчанию скрыт, после `F` показывается; автообновление при загрузке модели/смене текстур/смене режима рендера.
-3.5 Производительность: без блокирующего IO в `paintGL`; форматирование текста на событии загрузки; кэшированные строки для рендера оверлея.
+3.4 Состояния: по умолчанию скрыт; автообновление при загрузке модели и при смене материалов/каналов.
+3.5 Производительность: без блокирующего IO в рендер-пути; текст оверлея формируется заранее из текущего состояния.
 3.6 Реализация:
-3.6.1 Добавить `overlay_visible` и `overlay_text_lines` в `OpenGLWidget`.
-3.6.2 Добавить API `set_overlay_data(dict)` и `toggle_overlay()`.
-3.6.3 Добавить `QShortcut(Qt.Key_F, self)` в `MainWindow` и связать с `gl_widget.toggle_overlay`.
-3.6.4 Формировать payload оверлея в `_on_model_loaded` из debug-данных модели и текущих биндингов текстур.
-3.6.5 Рисовать оверлей в `paintGL()` через `QPainter` после 3D-прохода.
-3.7 Критерии приёмки:
-3.7.1 Нажатие `F` мгновенно переключает оверлей без подтормаживания кадра.
-3.7.2 Для больших FBX метаданные появляются не позднее 100 мс после появления модели.
-3.7.3 Значения оверлея совпадают с debug-логом модели и выбранными текстурами в контролах.
+3.6.1 `OpenGLWidget`: `overlay_visible`, `overlay_lines`.
+3.6.2 API `OpenGLWidget`: `set_overlay_lines(lines)`, `set_overlay_visible(visible)`, `toggle_overlay()`.
+3.6.3 `MainWindow`: `QShortcut(Qt.Key_F1, self)` для переключения.
+3.6.4 `MainWindow`: `_refresh_overlay_data()` собирает и отправляет строки оверлея.
+3.6.5 Отрисовка оверлея: UI-слой поверх 3D viewport (без изменений shadow pipeline).
+3.7 Критерии приемки:
+3.7.1 Нажатие `F1` мгновенно переключает оверлей.
+3.7.2 Значения оверлея обновляются после загрузки модели и смены материалов.
+3.7.3 Значения оверлея совпадают с debug info и выбранными текстурами.
 
-## Этап 3: Конвейеры + валидация
-1. Разбор правил из файла `docs/profiles.yaml`.
-2. Статусы покрытия для каждого конвейера (`готово/частично/отсутствует`).
+## Этап 3: Конвейеры и валидация
+1. Разбор правил из `docs/profiles.yaml`.
+2. Статусы покрытия по конвейерам (`ready/partial/missing`).
 3. Панель результатов валидации и фильтры.
 
 ## Этап 4: Запросы/задачи
 1. Карточки запросов аналитика + ссылки.
-2. Рабочий процесс назначения исполнителей и статусов для моделлеров.
-3. Привязка задач к ресурсам и целям конвейера.
+2. Workflow назначения исполнителей и статусов для моделлеров.
+3. Привязка задач к ассетам и целям конвейера.
 
 ## Этап 5: Экспорт
-1. Очередь выбранных ресурсов.
-2. Экспорт в папку / ZIP-архив для каждой модели / единый ZIP-архив.
+1. Очередь выбранных ассетов.
+2. Экспорт в папку / zip на модель / единый zip.
 3. Генерация манифеста и скриншотов.
 
 ## Этап 6: Интеграции
-1. Добавление опционального адаптера для YouTrack.
+1. Добавление опционального адаптера YouTrack.
 2. Синхронизация локальных запросов с внешними задачами.
