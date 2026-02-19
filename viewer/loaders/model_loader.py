@@ -26,8 +26,9 @@ except ImportError:
     fbx = None
 
 
-_PAYLOAD_CACHE_VERSION = "v1"
+_PAYLOAD_CACHE_VERSION = "v3"
 _PAYLOAD_CACHE_DIR = os.path.join(".cache", "payload_cache")
+_SMOOTH_FALLBACK_MAX_POLYGONS = 250000
 
 
 @dataclass
@@ -77,10 +78,12 @@ def _try_save_payload_cache(file_path: str, fast_mode: bool, payload: MeshPayloa
 
 
 def load_model_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
+    t0 = time.perf_counter()
     cached = _try_load_payload_cache(file_path, fast_mode=fast_mode)
     if cached is not None:
         cached.debug_info = dict(cached.debug_info or {})
         cached.debug_info["cache_hit"] = True
+        cached.debug_info["timing_cache_io_sec"] = round(float(time.perf_counter() - t0), 4)
         return cached
 
     if file_path.lower().endswith(".fbx"):
@@ -90,6 +93,7 @@ def load_model_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
 
     payload.debug_info = dict(payload.debug_info or {})
     payload.debug_info["cache_hit"] = False
+    payload.debug_info["timing_cache_io_sec"] = round(float(time.perf_counter() - t0), 4)
     _try_save_payload_cache(file_path, fast_mode=fast_mode, payload=payload)
     return payload
 
@@ -472,6 +476,8 @@ def _parse_fbx_scene(scene, model_dir: str, collect_uv: bool = True):
     mesh_count = 0
     multi_material_mesh_count = 0
     first_uv_set = None
+    smooth_fallback_count = 0
+    face_fallback_count = 0
 
     mesh_attr_type = _get_fbx_mesh_attr_type()
     node_count = scene.GetNodeCount()
@@ -490,6 +496,8 @@ def _parse_fbx_scene(scene, model_dir: str, collect_uv: bool = True):
         poly_count = int(mesh.GetPolygonCount())
         polygon_sizes = [int(mesh.GetPolygonSize(j)) for j in range(poly_count)]
         uv_resolver = _build_fbx_uv_resolver(mesh, polygon_sizes, uv_set_name) if collect_uv else None
+        smooth_fallback_enabled = bool(collect_uv and poly_count <= _SMOOTH_FALLBACK_MAX_POLYGONS)
+        cp_smooth_normals = None
         polygon_materials = _get_polygon_material_indices(mesh)
         is_multi_material = _mesh_uses_multiple_materials(node, polygon_materials)
         if is_multi_material:
@@ -574,6 +582,15 @@ def _parse_fbx_scene(scene, model_dir: str, collect_uv: bool = True):
                     cp = control_points[cp_index]
                     normal = _get_fbx_vertex_normal(mesh, j, slot)
                     if normal is None:
+                        if smooth_fallback_enabled:
+                            if cp_smooth_normals is None:
+                                cp_smooth_normals = _compute_smooth_control_point_normals(mesh, control_points)
+                            if cp_index < len(cp_smooth_normals):
+                                cpn = cp_smooth_normals[cp_index]
+                                if cpn is not None:
+                                    normal = cpn
+                                    smooth_fallback_count += 1
+                    if normal is None:
                         if face_normal is None:
                             face_normal = _compute_triangle_face_normal_from_control_points(
                                 control_points,
@@ -582,6 +599,7 @@ def _parse_fbx_scene(scene, model_dir: str, collect_uv: bool = True):
                                 polygon[k + 1],
                             )
                         normal = face_normal
+                        face_fallback_count += 1
 
                     uv = None
                     if collect_uv:
@@ -606,6 +624,8 @@ def _parse_fbx_scene(scene, model_dir: str, collect_uv: bool = True):
         "fbx_uv_set": first_uv_set,
         "fbx_uv_found": uv_found_count,
         "fbx_uv_missing": uv_missing_count,
+        "fbx_smooth_fallback_normals": smooth_fallback_count,
+        "fbx_face_fallback_normals": face_fallback_count,
     }
     return vertices, indices, normals, texcoords, debug, submesh_groups, material_textures
 

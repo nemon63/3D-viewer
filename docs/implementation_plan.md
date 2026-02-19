@@ -6,9 +6,10 @@
 3. Events (`new/updated/removed`) logging.
 
 ## Phase 2: Catalog UX
-1. List with search, date filter, favorites, categories.
-2. Preview cache generation (thumb/cardsheet).
-3. Model card with metadata (polycount, UV, textures).
+Status: 2/3 complete.
+1. [x] List with search, date filter, favorites, categories.
+2. [x] Preview cache generation (thumb/cardsheet).
+3. [ ] Model card with metadata (polycount, UV, textures).
 
 ## Phase 3: Pipelines + Validation
 1. Parse rules from `docs/profiles.yaml`.
