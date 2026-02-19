@@ -2,6 +2,7 @@ import os
 
 import numpy as np
 from PyQt5.QtCore import QPoint, Qt, QTimer
+from PyQt5.QtGui import QColor, QFont, QPainter
 from PyQt5.QtWidgets import QOpenGLWidget
 from OpenGL.GL import (
     GL_BLEND,
@@ -446,6 +447,8 @@ class OpenGLWidget(QOpenGLWidget):
         self.alpha_render_mode = "cutout"
         self.use_base_alpha_in_blend = False
         self._view_matrix = np.identity(4, dtype=np.float32)
+        self.overlay_visible = False
+        self.overlay_lines = []
 
         self._inertia_timer = QTimer(self)
         self._inertia_timer.setInterval(16)
@@ -650,6 +653,7 @@ class OpenGLWidget(QOpenGLWidget):
         )
 
         if self.vertices.size == 0 or self.indices.size == 0 or self.shader_program is None:
+            self._draw_overlay()
             return
 
         glPushMatrix()
@@ -692,6 +696,50 @@ class OpenGLWidget(QOpenGLWidget):
             glPopMatrix()
 
         self._draw_shadow_catcher()
+        self._draw_overlay()
+
+    def set_overlay_lines(self, lines):
+        self.overlay_lines = [str(line) for line in (lines or []) if str(line).strip()]
+        self.update()
+
+    def set_overlay_visible(self, visible: bool):
+        self.overlay_visible = bool(visible)
+        self.update()
+
+    def toggle_overlay(self):
+        self.overlay_visible = not self.overlay_visible
+        self.update()
+        return self.overlay_visible
+
+    def _draw_overlay(self):
+        if not self.overlay_visible:
+            return
+        lines = self.overlay_lines or ["No model loaded."]
+
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.TextAntialiasing, True)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setPen(QColor(235, 243, 252))
+            painter.setFont(QFont("Consolas", 10))
+
+            fm = painter.fontMetrics()
+            line_height = max(fm.height(), 14) + 2
+            padding = 10
+            margin = 12
+            width = 260
+            for line in lines:
+                width = max(width, fm.horizontalAdvance(line) + padding * 2)
+            height = padding * 2 + line_height * len(lines)
+
+            painter.fillRect(margin, margin, width, height, QColor(6, 14, 24, 186))
+            y = margin + padding + fm.ascent()
+            x = margin + padding
+            for line in lines:
+                painter.drawText(x, y, line)
+                y += line_height
+        finally:
+            painter.end()
 
     def _set_common_uniforms(self):
         self._set_sampler_uniform("uBaseColorTex", 0)

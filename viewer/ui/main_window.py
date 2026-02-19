@@ -890,6 +890,10 @@ class MainWindow(QMainWindow):
         self.shortcut_lit.setContext(Qt.WindowShortcut)
         self.shortcut_lit.activated.connect(self._toggle_lit_action)
 
+        self.shortcut_overlay = QShortcut(Qt.Key_F1, self)
+        self.shortcut_overlay.setContext(Qt.WindowShortcut)
+        self.shortcut_overlay.activated.connect(self._toggle_overlay_action)
+
     def _reset_view_action(self):
         self.gl_widget.reset_view()
         self._sync_projection_combo()
@@ -904,6 +908,11 @@ class MainWindow(QMainWindow):
         self.gl_widget.unlit_texture_preview = not self.gl_widget.unlit_texture_preview
         self._update_status(self._current_model_index())
         self.gl_widget.update()
+
+    def _toggle_overlay_action(self):
+        visible = self.gl_widget.toggle_overlay()
+        state = "ON" if visible else "OFF"
+        self.statusBar().showMessage(f"Overlay: {state}", 1500)
 
     def _populate_material_controls(self, texture_sets):
         for channel, _title in self.material_channels:
@@ -933,6 +942,7 @@ class MainWindow(QMainWindow):
         if path:
             self.gl_widget.apply_texture_path("basecolor", path)
             self._update_status(self._current_model_index())
+            self._refresh_overlay_data()
 
     def _apply_channel_texture(self, channel):
         combo = self.material_boxes.get(channel)
@@ -942,8 +952,38 @@ class MainWindow(QMainWindow):
         self.gl_widget.apply_texture_path(channel, path or "")
         self._update_status(self._current_model_index())
 
+    def _refresh_overlay_data(self, file_path: str = ""):
+        active_path = file_path or self.current_file_path or self._current_selected_path() or ""
+        debug = self.gl_widget.last_debug_info or {}
+        vertices = int(self.gl_widget.vertices.shape[0]) if getattr(self.gl_widget.vertices, "ndim", 0) == 2 else 0
+        triangles = int(self.gl_widget.indices.size // 3) if self.gl_widget.indices.size else 0
+        submeshes = len(self.gl_widget.submeshes or [])
+        objects = int(debug.get("object_count", 0) or 0)
+        materials = int(debug.get("material_count", 0) or 0)
+        uv_count = int(debug.get("uv_count", 0) or 0)
+        tex_candidates = int(debug.get("texture_candidates_count", 0) or 0)
+
+        def _name(path):
+            return os.path.basename(path) if path else "-"
+
+        tex_paths = self.gl_widget.last_texture_paths or {}
+        lines = [
+            f"Model: {os.path.basename(active_path) if active_path else '-'}",
+            f"Vertices: {vertices:,}  Triangles: {triangles:,}",
+            f"Objects: {objects}  Submeshes: {submeshes}  Materials: {materials}",
+            f"UV vertices: {uv_count:,}  Texture candidates: {tex_candidates}",
+            f"Base: {_name(tex_paths.get('basecolor', ''))}",
+            f"Metal: {_name(tex_paths.get('metal', ''))}",
+            f"Rough: {_name(tex_paths.get('roughness', ''))}",
+            f"Normal: {_name(tex_paths.get('normal', ''))}",
+            f"Alpha: {self.gl_widget.alpha_render_mode}  Base alpha: {'on' if self.gl_widget.use_base_alpha_in_blend else 'off'}",
+            f"Projection: {self.gl_widget.projection_mode}  Shadows: {self.gl_widget.shadow_status_message}",
+        ]
+        self.gl_widget.set_overlay_lines(lines)
+
     def _update_status(self, row):
         if row < 0 or row >= len(self.filtered_model_files):
+            self._refresh_overlay_data()
             return
         file_path = self.filtered_model_files[row]
         debug = self.gl_widget.last_debug_info or {}
@@ -957,6 +997,7 @@ class MainWindow(QMainWindow):
             f"Открыт: {os.path.basename(file_path)} ({row + 1}/{len(self.filtered_model_files)}) | "
             f"UV: {uv_count} | Текстур-кандидатов: {tex_count} | Текстура: {tex_file} | {preview} | {projection} | shadows:{shadow_state}"
         )
+        self._refresh_overlay_data(file_path)
         self._append_index_status()
 
     def _on_alpha_cutoff_changed(self, value: int):
@@ -1217,6 +1258,7 @@ class MainWindow(QMainWindow):
         self.current_file_path = file_path
         self._update_favorite_button_for_current()
         self._populate_material_controls(self.gl_widget.last_texture_sets)
+        self._refresh_overlay_data(file_path)
         self._update_status(row)
         self.setWindowTitle(f"3D Viewer - {os.path.basename(file_path)}")
         if file_path:
