@@ -313,6 +313,38 @@ class MainWindow(QMainWindow):
         light_layout.addRow("Fill light", self.fill_light_slider)
         light_layout.addRow("Fill x", self.fill_light_label)
 
+        self.key_azimuth_label = QLabel("42°", self)
+        self.key_azimuth_slider = QSlider(Qt.Horizontal, self)
+        self.key_azimuth_slider.setRange(-180, 180)
+        self.key_azimuth_slider.setValue(42)
+        self.key_azimuth_slider.valueChanged.connect(self._on_key_light_azimuth_changed)
+        light_layout.addRow("Key azimuth", self.key_azimuth_slider)
+        light_layout.addRow("Key az", self.key_azimuth_label)
+
+        self.key_elevation_label = QLabel("34°", self)
+        self.key_elevation_slider = QSlider(Qt.Horizontal, self)
+        self.key_elevation_slider.setRange(-45, 89)
+        self.key_elevation_slider.setValue(34)
+        self.key_elevation_slider.valueChanged.connect(self._on_key_light_elevation_changed)
+        light_layout.addRow("Key elevation", self.key_elevation_slider)
+        light_layout.addRow("Key el", self.key_elevation_label)
+
+        self.fill_azimuth_label = QLabel("-52°", self)
+        self.fill_azimuth_slider = QSlider(Qt.Horizontal, self)
+        self.fill_azimuth_slider.setRange(-180, 180)
+        self.fill_azimuth_slider.setValue(-52)
+        self.fill_azimuth_slider.valueChanged.connect(self._on_fill_light_azimuth_changed)
+        light_layout.addRow("Fill azimuth", self.fill_azimuth_slider)
+        light_layout.addRow("Fill az", self.fill_azimuth_label)
+
+        self.fill_elevation_label = QLabel("18°", self)
+        self.fill_elevation_slider = QSlider(Qt.Horizontal, self)
+        self.fill_elevation_slider.setRange(-45, 89)
+        self.fill_elevation_slider.setValue(18)
+        self.fill_elevation_slider.valueChanged.connect(self._on_fill_light_elevation_changed)
+        light_layout.addRow("Fill elevation", self.fill_elevation_slider)
+        light_layout.addRow("Fill el", self.fill_elevation_label)
+
         self.bg_brightness_label = QLabel("1.00", self)
         self.bg_brightness_slider = QSlider(Qt.Horizontal, self)
         self.bg_brightness_slider.setRange(20, 200)
@@ -338,6 +370,30 @@ class MainWindow(QMainWindow):
         self.shadows_checkbox.stateChanged.connect(self._on_shadows_toggled)
         light_layout.addRow(self.shadows_checkbox)
 
+        self.shadow_opacity_label = QLabel("0.42", self)
+        self.shadow_opacity_slider = QSlider(Qt.Horizontal, self)
+        self.shadow_opacity_slider.setRange(0, 100)
+        self.shadow_opacity_slider.setValue(42)
+        self.shadow_opacity_slider.valueChanged.connect(self._on_shadow_opacity_changed)
+        light_layout.addRow("Shadow opacity", self.shadow_opacity_slider)
+        light_layout.addRow("Shadow op", self.shadow_opacity_label)
+
+        self.shadow_bias_label = QLabel("0.0012", self)
+        self.shadow_bias_slider = QSlider(Qt.Horizontal, self)
+        self.shadow_bias_slider.setRange(5, 300)
+        self.shadow_bias_slider.setValue(12)
+        self.shadow_bias_slider.valueChanged.connect(self._on_shadow_bias_changed)
+        light_layout.addRow("Shadow bias", self.shadow_bias_slider)
+        light_layout.addRow("Shadow bias x", self.shadow_bias_label)
+
+        self.shadow_softness_label = QLabel("1.00", self)
+        self.shadow_softness_slider = QSlider(Qt.Horizontal, self)
+        self.shadow_softness_slider.setRange(50, 300)
+        self.shadow_softness_slider.setValue(100)
+        self.shadow_softness_slider.valueChanged.connect(self._on_shadow_softness_changed)
+        light_layout.addRow("Shadow softness", self.shadow_softness_slider)
+        light_layout.addRow("Shadow soft x", self.shadow_softness_label)
+
         reset_light_settings_button = QPushButton("Сбросить свет", self)
         reset_light_settings_button.clicked.connect(self._reset_light_settings)
         light_layout.addRow(reset_light_settings_button)
@@ -356,8 +412,15 @@ class MainWindow(QMainWindow):
         self._on_ambient_changed(self.ambient_slider.value())
         self._on_key_light_changed(self.key_light_slider.value())
         self._on_fill_light_changed(self.fill_light_slider.value())
+        self._on_key_light_azimuth_changed(self.key_azimuth_slider.value())
+        self._on_key_light_elevation_changed(self.key_elevation_slider.value())
+        self._on_fill_light_azimuth_changed(self.fill_azimuth_slider.value())
+        self._on_fill_light_elevation_changed(self.fill_elevation_slider.value())
         self._on_background_brightness_changed(self.bg_brightness_slider.value())
         self._on_background_gradient_changed(self.bg_gradient_slider.value())
+        self._on_shadow_opacity_changed(self.shadow_opacity_slider.value())
+        self._on_shadow_bias_changed(self.shadow_bias_slider.value())
+        self._on_shadow_softness_changed(self.shadow_softness_slider.value())
         self._on_shadows_toggled(Qt.Unchecked)
         self.statusBar().showMessage("Готово")
 
@@ -450,8 +513,15 @@ class MainWindow(QMainWindow):
         ambient = self.settings.value("view/ambient_slider", 8, type=int)
         key_light = self.settings.value("view/key_light_slider", 180, type=int)
         fill_light = self.settings.value("view/fill_light_slider", 100, type=int)
+        key_azimuth = self.settings.value("view/key_light_azimuth", 42, type=int)
+        key_elevation = self.settings.value("view/key_light_elevation", 34, type=int)
+        fill_azimuth = self.settings.value("view/fill_light_azimuth", -52, type=int)
+        fill_elevation = self.settings.value("view/fill_light_elevation", 18, type=int)
         bg_brightness = self.settings.value("view/bg_brightness_slider", 100, type=int)
         bg_gradient = self.settings.value("view/bg_gradient_slider", 100, type=int)
+        shadow_opacity = self.settings.value("view/shadow_opacity_slider", 42, type=int)
+        shadow_bias = self.settings.value("view/shadow_bias_slider", 12, type=int)
+        shadow_softness = self.settings.value("view/shadow_softness_slider", 100, type=int)
         ui_theme = self.settings.value("view/ui_theme", "graphite", type=str)
         bg_color_hex = self.settings.value("view/bg_color_hex", "#14233f", type=str)
         projection = self.settings.value("view/projection_mode", "perspective", type=str)
@@ -466,8 +536,15 @@ class MainWindow(QMainWindow):
         self.ambient_slider.setValue(max(self.ambient_slider.minimum(), min(self.ambient_slider.maximum(), ambient)))
         self.key_light_slider.setValue(max(self.key_light_slider.minimum(), min(self.key_light_slider.maximum(), key_light)))
         self.fill_light_slider.setValue(max(self.fill_light_slider.minimum(), min(self.fill_light_slider.maximum(), fill_light)))
+        self.key_azimuth_slider.setValue(max(self.key_azimuth_slider.minimum(), min(self.key_azimuth_slider.maximum(), key_azimuth)))
+        self.key_elevation_slider.setValue(max(self.key_elevation_slider.minimum(), min(self.key_elevation_slider.maximum(), key_elevation)))
+        self.fill_azimuth_slider.setValue(max(self.fill_azimuth_slider.minimum(), min(self.fill_azimuth_slider.maximum(), fill_azimuth)))
+        self.fill_elevation_slider.setValue(max(self.fill_elevation_slider.minimum(), min(self.fill_elevation_slider.maximum(), fill_elevation)))
         self.bg_brightness_slider.setValue(max(self.bg_brightness_slider.minimum(), min(self.bg_brightness_slider.maximum(), bg_brightness)))
         self.bg_gradient_slider.setValue(max(self.bg_gradient_slider.minimum(), min(self.bg_gradient_slider.maximum(), bg_gradient)))
+        self.shadow_opacity_slider.setValue(max(self.shadow_opacity_slider.minimum(), min(self.shadow_opacity_slider.maximum(), shadow_opacity)))
+        self.shadow_bias_slider.setValue(max(self.shadow_bias_slider.minimum(), min(self.shadow_bias_slider.maximum(), shadow_bias)))
+        self.shadow_softness_slider.setValue(max(self.shadow_softness_slider.minimum(), min(self.shadow_softness_slider.maximum(), shadow_softness)))
 
         theme_idx = self.theme_combo.findData(ui_theme)
         if theme_idx >= 0:
@@ -920,6 +997,51 @@ class MainWindow(QMainWindow):
         if self._settings_ready:
             self.settings.setValue("view/fill_light_slider", int(value))
 
+    def _on_key_light_azimuth_changed(self, value: int):
+        self.key_azimuth_label.setText(f"{int(value)} deg")
+        self.gl_widget.set_key_light_angles(value, self.key_elevation_slider.value())
+        if self._settings_ready:
+            self.settings.setValue("view/key_light_azimuth", int(value))
+
+    def _on_key_light_elevation_changed(self, value: int):
+        self.key_elevation_label.setText(f"{int(value)} deg")
+        self.gl_widget.set_key_light_angles(self.key_azimuth_slider.value(), value)
+        if self._settings_ready:
+            self.settings.setValue("view/key_light_elevation", int(value))
+
+    def _on_fill_light_azimuth_changed(self, value: int):
+        self.fill_azimuth_label.setText(f"{int(value)} deg")
+        self.gl_widget.set_fill_light_angles(value, self.fill_elevation_slider.value())
+        if self._settings_ready:
+            self.settings.setValue("view/fill_light_azimuth", int(value))
+
+    def _on_fill_light_elevation_changed(self, value: int):
+        self.fill_elevation_label.setText(f"{int(value)} deg")
+        self.gl_widget.set_fill_light_angles(self.fill_azimuth_slider.value(), value)
+        if self._settings_ready:
+            self.settings.setValue("view/fill_light_elevation", int(value))
+
+    def _on_shadow_opacity_changed(self, value: int):
+        opacity = value / 100.0
+        self.shadow_opacity_label.setText(f"{opacity:.2f}")
+        self.gl_widget.set_shadow_opacity(opacity)
+        if self._settings_ready:
+            self.settings.setValue("view/shadow_opacity_slider", int(value))
+
+    def _on_shadow_bias_changed(self, value: int):
+        bias = value / 10000.0
+        self.shadow_bias_label.setText(f"{bias:.4f}")
+        self.gl_widget.set_shadow_bias(bias)
+        if self._settings_ready:
+            self.settings.setValue("view/shadow_bias_slider", int(value))
+
+    def _on_shadow_softness_changed(self, value: int):
+        softness = value / 100.0
+        self.shadow_softness_label.setText(f"{softness:.2f}")
+        self.gl_widget.set_shadow_softness(softness)
+        if self._settings_ready:
+            self.settings.setValue("view/shadow_softness_slider", int(value))
+
     def _on_background_brightness_changed(self, value: int):
         brightness = value / 100.0
         self.bg_brightness_label.setText(f"{brightness:.2f}")
@@ -992,8 +1114,15 @@ class MainWindow(QMainWindow):
         self.ambient_slider.setValue(8)
         self.key_light_slider.setValue(180)
         self.fill_light_slider.setValue(100)
+        self.key_azimuth_slider.setValue(42)
+        self.key_elevation_slider.setValue(34)
+        self.fill_azimuth_slider.setValue(-52)
+        self.fill_elevation_slider.setValue(18)
         self.bg_brightness_slider.setValue(100)
         self.bg_gradient_slider.setValue(100)
+        self.shadow_opacity_slider.setValue(42)
+        self.shadow_bias_slider.setValue(12)
+        self.shadow_softness_slider.setValue(100)
         self._apply_background_color(QColor("#14233f"))
         if self._settings_ready:
             self.settings.setValue("view/bg_color_hex", "#14233f")

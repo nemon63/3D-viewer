@@ -142,8 +142,8 @@ varying vec3 vNormalView;
 varying vec2 vUv;
 varying vec4 vShadowCoord;
 
-uniform vec3 uLightPosView0;
-uniform vec3 uLightPosView1;
+uniform vec3 uLightDirView0;
+uniform vec3 uLightDirView1;
 uniform vec3 uLightColor0;
 uniform vec3 uLightColor1;
 
@@ -164,6 +164,8 @@ uniform int uFastMode;
 uniform int uShadowEnabled;
 uniform sampler2D uShadowMap;
 uniform vec2 uShadowTexelSize;
+uniform float uShadowBias;
+uniform float uShadowSoftness;
 
 float DistributionGGX(vec3 N, vec3 H, float roughness) {
     float a = roughness * roughness;
@@ -206,11 +208,12 @@ float computeShadow(vec3 N, vec3 L) {
         return 1.0;
     }
 
-    float bias = max(0.0008, 0.0035 * (1.0 - max(dot(N, L), 0.0)));
+    float ndotl = max(dot(N, L), 0.0);
+    float bias = max(uShadowBias, uShadowBias * (1.0 + 2.0 * (1.0 - ndotl)));
     float shadow = 0.0;
     for (int x = -1; x <= 1; ++x) {
         for (int y = -1; y <= 1; ++y) {
-            vec2 offset = vec2(float(x), float(y)) * uShadowTexelSize;
+            vec2 offset = vec2(float(x), float(y)) * uShadowTexelSize * uShadowSoftness;
             float depthFromMap = texture2D(uShadowMap, uv + offset).r;
             shadow += (currentDepth - bias > depthFromMap) ? 1.0 : 0.0;
         }
@@ -219,12 +222,10 @@ float computeShadow(vec3 N, vec3 L) {
     return 1.0 - shadow;
 }
 
-vec3 computeLight(vec3 N, vec3 V, vec3 albedo, float metallic, float roughness, vec3 F0, vec3 lightPos, vec3 lightColor) {
-    vec3 L = normalize(lightPos - vPosView);
+vec3 computeDirectionalLight(vec3 N, vec3 V, vec3 albedo, float metallic, float roughness, vec3 F0, vec3 lightDir, vec3 lightColor) {
+    vec3 L = normalize(lightDir);
     vec3 H = normalize(V + L);
-    float dist = length(lightPos - vPosView);
-    float attenuation = 1.0 / max(dist * dist, 0.0001);
-    vec3 radiance = lightColor * attenuation;
+    vec3 radiance = lightColor;
 
     float NDF = DistributionGGX(N, H, roughness);
     float G = GeometrySmith(N, V, L, roughness);
@@ -271,12 +272,12 @@ void main() {
 
     vec3 V = normalize(-vPosView);
     vec3 F0 = mix(vec3(0.04), base, metallic);
-    vec3 L0 = normalize(uLightPosView0 - vPosView);
+    vec3 L0 = normalize(uLightDirView0);
     float shadowFactor = computeShadow(N, L0);
 
     vec3 Lo = vec3(0.0);
-    Lo += computeLight(N, V, base, metallic, roughness, F0, uLightPosView0, uLightColor0) * shadowFactor;
-    Lo += computeLight(N, V, base, metallic, roughness, F0, uLightPosView1, uLightColor1);
+    Lo += computeDirectionalLight(N, V, base, metallic, roughness, F0, uLightDirView0, uLightColor0) * shadowFactor;
+    Lo += computeDirectionalLight(N, V, base, metallic, roughness, F0, uLightDirView1, uLightColor1);
 
     vec3 ambient = vec3(uAmbientStrength) * base;
     vec3 color = ambient + Lo;
@@ -325,6 +326,8 @@ uniform int uShadowEnabled;
 uniform sampler2D uShadowMap;
 uniform vec2 uShadowTexelSize;
 uniform float uShadowOpacity;
+uniform float uShadowBias;
+uniform float uShadowSoftness;
 
 float computeShadow() {
     if (uShadowEnabled == 0) {
@@ -338,11 +341,11 @@ float computeShadow() {
         return 1.0;
     }
 
-    float bias = 0.0015;
+    float bias = max(uShadowBias, 0.0001);
     float shadow = 0.0;
     for (int x = -1; x <= 1; ++x) {
         for (int y = -1; y <= 1; ++y) {
-            vec2 offset = vec2(float(x), float(y)) * uShadowTexelSize;
+            vec2 offset = vec2(float(x), float(y)) * uShadowTexelSize * uShadowSoftness;
             float depthFromMap = texture2D(uShadowMap, uv + offset).r;
             shadow += (currentDepth - bias > depthFromMap) ? 1.0 : 0.0;
         }
@@ -404,6 +407,10 @@ class OpenGLWidget(QOpenGLWidget):
             [1.8, 1.2, 2.0],
             [-1.6, 1.0, 1.8],
         ]
+        self.key_light_azimuth = 42.0
+        self.key_light_elevation = 34.0
+        self.fill_light_azimuth = -52.0
+        self.fill_light_elevation = 18.0
         self.light_colors = [
             [1.0, 0.98, 0.95],
             [0.75, 0.8, 1.0],
@@ -426,6 +433,10 @@ class OpenGLWidget(QOpenGLWidget):
         self.shadow_catcher_program = None
         self._light_vp = np.identity(4, dtype=np.float32)
         self.shadow_catcher_opacity = 0.42
+        self.shadow_bias = 0.0012
+        self.shadow_softness = 1.0
+        self.directional_light_energy = 0.12
+        self._view_matrix = np.identity(4, dtype=np.float32)
 
         self._inertia_timer = QTimer(self)
         self._inertia_timer.setInterval(16)
@@ -612,15 +623,29 @@ class OpenGLWidget(QOpenGLWidget):
         else:
             camera_distance = max(0.3, (self.model_radius * 2.8) / max(self.zoom, 0.01))
         target_y = self.model_target_y + self.pan_y
-        gluLookAt(self.pan_x, target_y, camera_distance, self.pan_x, target_y, 0, 0, 1, 0)
+        eye, target = self._camera_eye_and_target(camera_distance, target_y)
+        self._view_matrix = self._look_at_matrix(
+            eye,
+            target,
+            np.array([0.0, 1.0, 0.0], dtype=np.float32),
+        )
+        gluLookAt(
+            float(eye[0]),
+            float(eye[1]),
+            float(eye[2]),
+            float(target[0]),
+            float(target[1]),
+            float(target[2]),
+            0,
+            1,
+            0,
+        )
 
         if self.vertices.size == 0 or self.indices.size == 0 or self.shader_program is None:
             return
 
         glPushMatrix()
         self._apply_model_translation()
-        glRotatef(self.angle_x, 1, 0, 0)
-        glRotatef(self.angle_y, 0, 1, 0)
         glUseProgram(self.shader_program)
         try:
             self._set_common_uniforms()
@@ -650,10 +675,16 @@ class OpenGLWidget(QOpenGLWidget):
         self._set_float_uniform("uAlphaCutoff", self.alpha_cutoff)
         self._set_float_uniform("uAmbientStrength", self.ambient_strength)
 
-        self._set_vec3_uniform("uLightPosView0", *self.light_positions[0])
-        self._set_vec3_uniform("uLightPosView1", *self.light_positions[1])
-        key_color = [c * self.key_light_intensity for c in self.light_colors[0]]
-        fill_color = [c * self.fill_light_intensity for c in self.light_colors[1]]
+        target = np.array([0.0, self.model_target_y, 0.0], dtype=np.float32)
+        key_pos_world, fill_pos_world = self._effective_light_positions_world()
+        key_dir_world = self._normalize_vec3(np.asarray(key_pos_world, dtype=np.float32) - target)
+        fill_dir_world = self._normalize_vec3(np.asarray(fill_pos_world, dtype=np.float32) - target)
+        key_dir_view = self._world_dir_to_view_vec3(key_dir_world)
+        fill_dir_view = self._world_dir_to_view_vec3(fill_dir_world)
+        self._set_vec3_uniform("uLightDirView0", *key_dir_view)
+        self._set_vec3_uniform("uLightDirView1", *fill_dir_view)
+        key_color = [c * self.key_light_intensity * self.directional_light_energy for c in self.light_colors[0]]
+        fill_color = [c * self.fill_light_intensity * self.directional_light_energy for c in self.light_colors[1]]
         self._set_vec3_uniform("uLightColor0", *key_color)
         self._set_vec3_uniform("uLightColor1", *fill_color)
         self._set_matrix_uniform("uLightVP", self._light_vp)
@@ -661,6 +692,8 @@ class OpenGLWidget(QOpenGLWidget):
         self._set_vec3_uniform("uModelOffset", *self.model_translate)
         texel = 1.0 / float(max(self.shadow_size, 1))
         self._set_int_uniform("uShadowEnabled", 1 if (self.enable_ground_shadow and self.shadow_depth_tex) else 0)
+        self._set_float_uniform("uShadowBias", self.shadow_bias)
+        self._set_float_uniform("uShadowSoftness", self.shadow_softness)
         location = glGetUniformLocation(self.shader_program, "uShadowTexelSize")
         if location != -1:
             glUniform2f(location, texel, texel)
@@ -757,8 +790,8 @@ class OpenGLWidget(QOpenGLWidget):
         if not (self.enable_ground_shadow and self.shadow_depth_tex):
             return
 
-        size = max(1.6, self.model_radius * 3.0)
-        y = 0.001
+        size = max(2.2, self.model_radius * 3.8)
+        y = -0.0005
         texel = 1.0 / float(max(self.shadow_size, 1))
 
         glUseProgram(self.shadow_catcher_program)
@@ -776,6 +809,12 @@ class OpenGLWidget(QOpenGLWidget):
             loc = glGetUniformLocation(self.shadow_catcher_program, "uShadowOpacity")
             if loc != -1:
                 glUniform1f(loc, float(self.shadow_catcher_opacity))
+            loc = glGetUniformLocation(self.shadow_catcher_program, "uShadowBias")
+            if loc != -1:
+                glUniform1f(loc, float(self.shadow_bias))
+            loc = glGetUniformLocation(self.shadow_catcher_program, "uShadowSoftness")
+            if loc != -1:
+                glUniform1f(loc, float(self.shadow_softness))
             self._bind_texture_unit(4, self.shadow_depth_tex)
 
             glEnable(GL_BLEND)
@@ -793,10 +832,18 @@ class OpenGLWidget(QOpenGLWidget):
 
     def _render_shadow_map(self):
         target = np.array([0.0, self.model_target_y, 0.0], dtype=np.float32)
-        light_pos = np.array(self.light_positions[0], dtype=np.float32)
+        key_pos_world = np.array(self._effective_light_positions_world()[0], dtype=np.float32)
+        light_dir = self._normalize_vec3(key_pos_world - target)
+        shadow_distance = max(4.0, self.model_radius * 6.0)
+        light_pos = target + light_dir * shadow_distance
         light_view = self._look_at_matrix(light_pos, target, np.array([0.0, 1.0, 0.0], dtype=np.float32))
-        extent = max(1.0, self.model_radius * 1.8)
-        light_proj = self._ortho_matrix(-extent, extent, -extent, extent, 0.1, max(12.0, self.model_radius * 8.0))
+        cover_radius = max(0.6, self.model_radius * 1.45)
+        near = max(0.1, shadow_distance - cover_radius * 2.5)
+        far = shadow_distance + cover_radius * 2.5
+        half_fov = np.arctan(cover_radius / max(shadow_distance, 1e-4))
+        fov_deg = np.degrees(half_fov * 2.0) * 1.6
+        fov_deg = min(max(float(fov_deg), 35.0), 110.0)
+        light_proj = self._perspective_matrix(fov_deg, 1.0, near, far)
         self._light_vp = np.dot(light_proj, light_view).astype(np.float32)
 
         glBindFramebuffer(GL_FRAMEBUFFER, self.shadow_fbo)
@@ -975,30 +1022,55 @@ class OpenGLWidget(QOpenGLWidget):
         return m
 
     def _model_rotation_matrix(self):
-        ax = np.deg2rad(float(self.angle_x))
-        ay = np.deg2rad(float(self.angle_y))
-        cx, sx = np.cos(ax), np.sin(ax)
-        cy, sy = np.cos(ay), np.sin(ay)
+        return np.identity(4, dtype=np.float32)
 
-        rx = np.array(
+    def _camera_eye_and_target(self, camera_distance: float, target_y: float):
+        target = np.array([self.pan_x, target_y, 0.0], dtype=np.float32)
+        pitch = np.deg2rad(float(self.angle_x))
+        yaw = np.deg2rad(float(self.angle_y))
+        dir_vec = np.array(
             [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, cx, -sx, 0.0],
-                [0.0, sx, cx, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
+                np.sin(yaw) * np.cos(pitch),
+                np.sin(pitch),
+                np.cos(yaw) * np.cos(pitch),
             ],
             dtype=np.float32,
         )
-        ry = np.array(
-            [
-                [cy, 0.0, sy, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [-sy, 0.0, cy, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-            dtype=np.float32,
-        )
-        return np.dot(rx, ry).astype(np.float32)
+        eye = target + dir_vec * float(camera_distance)
+        return eye, target
+
+    def _effective_light_positions_world(self):
+        target = np.array([0.0, self.model_target_y, 0.0], dtype=np.float32)
+        base_distance = max(1.6, self.model_radius * 2.8)
+        key = self._spherical_light_position(self.key_light_azimuth, self.key_light_elevation, base_distance, target)
+        fill = self._spherical_light_position(self.fill_light_azimuth, self.fill_light_elevation, base_distance * 0.9, target)
+        self.light_positions = [key.tolist(), fill.tolist()]
+        return key, fill
+
+    def _spherical_light_position(self, azimuth_deg: float, elevation_deg: float, radius: float, target):
+        az = np.deg2rad(float(azimuth_deg))
+        el = np.deg2rad(float(elevation_deg))
+        x = np.sin(az) * np.cos(el)
+        y = np.sin(el)
+        z = np.cos(az) * np.cos(el)
+        return target + np.array([x, y, z], dtype=np.float32) * float(radius)
+
+    def _world_to_view_vec3(self, vec3):
+        v4 = np.array([float(vec3[0]), float(vec3[1]), float(vec3[2]), 1.0], dtype=np.float32)
+        out = np.dot(self._view_matrix, v4)
+        return float(out[0]), float(out[1]), float(out[2])
+
+    def _world_dir_to_view_vec3(self, vec3):
+        v4 = np.array([float(vec3[0]), float(vec3[1]), float(vec3[2]), 0.0], dtype=np.float32)
+        out = np.dot(self._view_matrix, v4)
+        return self._normalize_vec3(out[:3])
+
+    def _normalize_vec3(self, vec3):
+        v = np.asarray(vec3, dtype=np.float32)
+        n = float(np.linalg.norm(v))
+        if n < 1e-6:
+            return np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        return v / n
 
     def _ortho_matrix(self, left, right, bottom, top, near, far):
         m = np.identity(4, dtype=np.float32)
@@ -1008,6 +1080,21 @@ class OpenGLWidget(QOpenGLWidget):
         m[0, 3] = -(right + left) / max(right - left, 1e-6)
         m[1, 3] = -(top + bottom) / max(top - bottom, 1e-6)
         m[2, 3] = -(far + near) / max(far - near, 1e-6)
+        return m
+
+    def _perspective_matrix(self, fov_deg: float, aspect: float, near: float, far: float):
+        fov_rad = np.deg2rad(max(1.0, float(fov_deg)))
+        tan_half = np.tan(fov_rad * 0.5)
+        near = max(0.01, float(near))
+        far = max(near + 0.1, float(far))
+        aspect = max(0.1, float(aspect))
+
+        m = np.zeros((4, 4), dtype=np.float32)
+        m[0, 0] = 1.0 / max(aspect * tan_half, 1e-6)
+        m[1, 1] = 1.0 / max(tan_half, 1e-6)
+        m[2, 2] = (far + near) / (near - far)
+        m[2, 3] = (2.0 * far * near) / (near - far)
+        m[3, 2] = -1.0
         return m
 
     def mousePressEvent(self, event):
@@ -1024,8 +1111,8 @@ class OpenGLWidget(QOpenGLWidget):
             dx = event.x() - self.last_mouse_pos.x()
             dy = event.y() - self.last_mouse_pos.y()
             rot_scale = self.rotate_speed * accel
-            self.angle_x += dy * rot_scale
-            self.angle_y += dx * rot_scale
+            self.angle_x = max(-89.0, min(89.0, self.angle_x + dy * rot_scale))
+            self.angle_y = (self.angle_y + dx * rot_scale) % 360.0
             self._orbit_vel_x = dx * rot_scale * 0.12
             self._orbit_vel_y = dy * rot_scale * 0.12
             self.last_mouse_pos = event.pos()
@@ -1061,8 +1148,8 @@ class OpenGLWidget(QOpenGLWidget):
         super().mouseReleaseEvent(event)
 
     def set_angle(self, angle_x: float, angle_y: float):
-        self.angle_x = angle_x
-        self.angle_y = angle_y
+        self.angle_x = max(-89.0, min(89.0, float(angle_x)))
+        self.angle_y = float(angle_y) % 360.0
         self.update()
 
     def fit_model(self):
@@ -1181,14 +1268,36 @@ class OpenGLWidget(QOpenGLWidget):
         self.resizeGL(self.width(), self.height())
 
     def _on_inertia_tick(self):
-        self.angle_y += self._orbit_vel_x
-        self.angle_x += self._orbit_vel_y
+        self.angle_y = (self.angle_y + self._orbit_vel_x) % 360.0
+        self.angle_x = max(-89.0, min(89.0, self.angle_x + self._orbit_vel_y))
         self._orbit_vel_x *= self._inertia_damping
         self._orbit_vel_y *= self._inertia_damping
         if abs(self._orbit_vel_x) + abs(self._orbit_vel_y) < self._inertia_min_velocity:
             self._inertia_timer.stop()
             self._orbit_vel_x = 0.0
             self._orbit_vel_y = 0.0
+        self.update()
+
+    def set_key_light_angles(self, azimuth_deg: float, elevation_deg: float):
+        self.key_light_azimuth = float(azimuth_deg)
+        self.key_light_elevation = max(-89.0, min(89.0, float(elevation_deg)))
+        self.update()
+
+    def set_fill_light_angles(self, azimuth_deg: float, elevation_deg: float):
+        self.fill_light_azimuth = float(azimuth_deg)
+        self.fill_light_elevation = max(-89.0, min(89.0, float(elevation_deg)))
+        self.update()
+
+    def set_shadow_bias(self, value: float):
+        self.shadow_bias = min(max(float(value), 0.00005), 0.02)
+        self.update()
+
+    def set_shadow_softness(self, value: float):
+        self.shadow_softness = min(max(float(value), 0.5), 3.0)
+        self.update()
+
+    def set_shadow_opacity(self, value: float):
+        self.shadow_catcher_opacity = min(max(float(value), 0.0), 1.0)
         self.update()
 
     def apply_texture_path(self, channel: str, path: str) -> bool:
