@@ -3,6 +3,8 @@ import os
 
 TEXTURE_EXTS = (".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff")
 _DIR_SCAN_CACHE = {}
+_MAX_TEXTURE_SCAN_FILES = 20000
+_MAX_TEXTURE_SCAN_DEPTH = 4
 
 CHANNEL_BASECOLOR = "basecolor"
 CHANNEL_METAL = "metal"
@@ -103,14 +105,52 @@ def _get_cached_texture_files(model_dir):
     for directory in search_dirs:
         if not os.path.isdir(directory):
             continue
-        for root, _, names in os.walk(directory):
-            for name in names:
-                lower = name.lower()
-                if lower.endswith(TEXTURE_EXTS):
-                    candidates.append(os.path.join(root, name))
+        candidates.extend(_scan_texture_files_non_recursive(directory))
+
+    if candidates:
+        _DIR_SCAN_CACHE[norm_model_dir] = list(candidates)
+        return candidates
+
+    for directory in search_dirs:
+        if not os.path.isdir(directory):
+            continue
+        candidates.extend(_scan_texture_files_recursive_limited(directory))
 
     _DIR_SCAN_CACHE[norm_model_dir] = list(candidates)
     return candidates
+
+
+def _scan_texture_files_non_recursive(directory: str):
+    out = []
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+                lower = entry.name.lower()
+                if lower.endswith(TEXTURE_EXTS):
+                    out.append(entry.path)
+    except OSError:
+        return out
+    return out
+
+
+def _scan_texture_files_recursive_limited(directory: str):
+    out = []
+    base_depth = directory.rstrip("\\/").count(os.sep)
+    scanned_files = 0
+    for root, _, names in os.walk(directory):
+        depth = root.rstrip("\\/").count(os.sep) - base_depth
+        if depth > _MAX_TEXTURE_SCAN_DEPTH:
+            continue
+        for name in names:
+            scanned_files += 1
+            if scanned_files > _MAX_TEXTURE_SCAN_FILES:
+                return out
+            lower = name.lower()
+            if lower.endswith(TEXTURE_EXTS):
+                out.append(os.path.join(root, name))
+    return out
 
 
 def resolve_texture_path(model_dir, abs_path, rel_path):

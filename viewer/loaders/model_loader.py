@@ -1,5 +1,8 @@
 import os
+import pickle
 import re
+import time
+import hashlib
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -23,6 +26,10 @@ except ImportError:
     fbx = None
 
 
+_PAYLOAD_CACHE_VERSION = "v1"
+_PAYLOAD_CACHE_DIR = os.path.join(".cache", "payload_cache")
+
+
 @dataclass
 class MeshPayload:
     vertices: np.ndarray
@@ -35,10 +42,56 @@ class MeshPayload:
     debug_info: dict = field(default_factory=dict)
 
 
+def _payload_cache_path(file_path: str, fast_mode: bool) -> str:
+    try:
+        st = os.stat(file_path)
+        identity = f"{os.path.abspath(file_path)}|{st.st_size}|{st.st_mtime_ns}|{bool(fast_mode)}|{_PAYLOAD_CACHE_VERSION}"
+    except OSError:
+        identity = f"{os.path.abspath(file_path)}|{bool(fast_mode)}|{_PAYLOAD_CACHE_VERSION}"
+    key = hashlib.sha1(identity.encode("utf-8")).hexdigest()
+    return os.path.join(_PAYLOAD_CACHE_DIR, f"{key}.pkl")
+
+
+def _try_load_payload_cache(file_path: str, fast_mode: bool):
+    cache_path = _payload_cache_path(file_path, fast_mode=fast_mode)
+    if not os.path.isfile(cache_path):
+        return None
+    try:
+        with open(cache_path, "rb") as fh:
+            payload = pickle.load(fh)
+        if not isinstance(payload, MeshPayload):
+            return None
+        return payload
+    except Exception:
+        return None
+
+
+def _try_save_payload_cache(file_path: str, fast_mode: bool, payload: MeshPayload):
+    cache_path = _payload_cache_path(file_path, fast_mode=fast_mode)
+    try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "wb") as fh:
+            pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        return
+
+
 def load_model_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
+    cached = _try_load_payload_cache(file_path, fast_mode=fast_mode)
+    if cached is not None:
+        cached.debug_info = dict(cached.debug_info or {})
+        cached.debug_info["cache_hit"] = True
+        return cached
+
     if file_path.lower().endswith(".fbx"):
-        return _load_fbx_payload(file_path, fast_mode=fast_mode)
-    return _load_trimesh_payload(file_path, fast_mode=fast_mode)
+        payload = _load_fbx_payload(file_path, fast_mode=fast_mode)
+    else:
+        payload = _load_trimesh_payload(file_path, fast_mode=fast_mode)
+
+    payload.debug_info = dict(payload.debug_info or {})
+    payload.debug_info["cache_hit"] = False
+    _try_save_payload_cache(file_path, fast_mode=fast_mode, payload=payload)
+    return payload
 
 
 def _load_trimesh_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
@@ -280,6 +333,8 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
 
     manager = fbx.FbxManager.Create()
     importer = fbx.FbxImporter.Create(manager, "")
+    t_import_start = time.perf_counter()
+    t_import_done = t_import_start
     try:
         if not importer.Initialize(file_path, -1, manager.GetIOSettings()):
             raise RuntimeError("Failed to initialize FBX importer.")
@@ -287,9 +342,11 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
         scene = fbx.FbxScene.Create(manager, "")
         if not importer.Import(scene):
             raise RuntimeError("Failed to import FBX file.")
+        t_import_done = time.perf_counter()
     finally:
         importer.Destroy()
 
+    t_parse_start = time.perf_counter()
     try:
         model_dir = os.path.dirname(file_path)
         (
@@ -301,12 +358,14 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
             submesh_groups,
             material_textures,
         ) = _parse_fbx_scene(scene, model_dir=model_dir)
+        t_parse_done = time.perf_counter()
         vertices, indices, normals = process_mesh_data(
             vertices_raw,
             indices_raw,
             normals_raw,
             recompute_normals=not fast_mode,
         )
+        t_process_done = time.perf_counter()
 
         texcoords = np.array(texcoords_raw, dtype=np.float32)
         if texcoords.ndim != 2 or texcoords.shape[1] != 2:
@@ -366,6 +425,7 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
                     "texture_paths": _select_texture_paths(texture_sets, hint_names=[model_hint]),
                 }
             ]
+        t_textures_done = time.perf_counter()
 
         return MeshPayload(
             vertices=vertices,
@@ -384,6 +444,11 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
                 "material_count": len(material_names),
                 "object_names": sorted(object_names)[:16],
                 "material_names": sorted(material_names)[:16],
+                "timing_import_sec": round(float(t_import_done - t_import_start), 4),
+                "timing_parse_sec": round(float(t_parse_done - t_parse_start), 4),
+                "timing_process_sec": round(float(t_process_done - t_parse_done), 4),
+                "timing_texture_sec": round(float(t_textures_done - t_process_done), 4),
+                "timing_total_sec": round(float(t_textures_done - t_import_start), 4),
                 **fbx_debug,
             },
         )
@@ -418,14 +483,18 @@ def _parse_fbx_scene(scene, model_dir: str):
         mesh_count += 1
         control_points = mesh.GetControlPoints()
         uv_set_name = _get_fbx_uv_set_name(mesh)
+        poly_count = int(mesh.GetPolygonCount())
+        polygon_sizes = [int(mesh.GetPolygonSize(j)) for j in range(poly_count)]
+        uv_resolver = _build_fbx_uv_resolver(mesh, polygon_sizes, uv_set_name)
         polygon_materials = _get_polygon_material_indices(mesh)
         is_multi_material = _mesh_uses_multiple_materials(node, polygon_materials)
         if is_multi_material:
             multi_material_mesh_count += 1
         if first_uv_set is None:
             first_uv_set = uv_set_name
-        cp_normals = _compute_smooth_control_point_normals(mesh, control_points)
+        cp_normals = None
         object_name = str(node.GetName() or f"node_{i}")
+        material_group_by_index = {}
 
         shared_group = None
         if not is_multi_material:
@@ -446,14 +515,11 @@ def _parse_fbx_scene(scene, model_dir: str):
                     "indices": [],
                 }
             shared_group = submesh_groups[group_key]
-
-        for j in range(mesh.GetPolygonCount()):
-            poly_size = mesh.GetPolygonSize(j)
-            polygon = [mesh.GetPolygonVertex(j, k) for k in range(poly_size)]
-            if poly_size < 3:
-                continue
-            if is_multi_material:
-                material_index = polygon_materials[j] if j < len(polygon_materials) else -1
+        else:
+            unique_indices = sorted({int(idx) for idx in polygon_materials if int(idx) >= 0})
+            if not unique_indices and node is not None and node.GetMaterialCount() > 0:
+                unique_indices = [0]
+            for material_index in unique_indices:
                 material = _safe_get_node_material(node, material_index)
                 material_uid = _material_uid(material, fallback_index=material_index)
                 material_name = _material_name(material, fallback_index=material_index)
@@ -467,35 +533,59 @@ def _parse_fbx_scene(scene, model_dir: str):
                         "material_uid": material_uid,
                         "indices": [],
                     }
-                target_group = submesh_groups[group_key]
+                material_group_by_index[int(material_index)] = submesh_groups[group_key]
+
+        for j in range(poly_count):
+            poly_size = polygon_sizes[j]
+            polygon = [mesh.GetPolygonVertex(j, k) for k in range(poly_size)]
+            if poly_size < 3:
+                continue
+            if is_multi_material:
+                material_index = polygon_materials[j] if j < len(polygon_materials) else -1
+                target_group = material_group_by_index.get(int(material_index))
+                if target_group is None:
+                    material = _safe_get_node_material(node, material_index)
+                    material_uid = _material_uid(material, fallback_index=material_index)
+                    material_name = _material_name(material, fallback_index=material_index)
+                    if material_uid not in material_textures:
+                        material_textures[material_uid] = _collect_material_texture_sets(material, model_dir)
+                    group_key = (object_name, material_uid)
+                    if group_key not in submesh_groups:
+                        submesh_groups[group_key] = {
+                            "object_name": object_name,
+                            "material_name": material_name,
+                            "material_uid": material_uid,
+                            "indices": [],
+                        }
+                    target_group = submesh_groups[group_key]
+                    material_group_by_index[int(material_index)] = target_group
             else:
                 target_group = shared_group
 
             for k in range(1, poly_size - 1):
                 tri_slots = (0, k, k + 1)
-                tri_positions = []
-                for slot in tri_slots:
-                    cp_index = polygon[slot]
-                    cp = control_points[cp_index]
-                    tri_positions.append(np.array([cp[0], cp[1], cp[2]], dtype=np.float32))
-
-                face_normal = np.cross(tri_positions[1] - tri_positions[0], tri_positions[2] - tri_positions[0])
-                face_len = np.linalg.norm(face_normal)
-                if face_len > 0:
-                    face_normal /= face_len
+                face_normal = None
 
                 for slot in tri_slots:
                     cp_index = polygon[slot]
                     cp = control_points[cp_index]
                     normal = _get_fbx_vertex_normal(mesh, j, slot)
-                    if normal is None and cp_index < len(cp_normals):
-                        normal = cp_normals[cp_index]
                     if normal is None:
-                        normal = [float(face_normal[0]), float(face_normal[1]), float(face_normal[2])]
+                        if cp_normals is None:
+                            cp_normals = _compute_smooth_control_point_normals(mesh, control_points)
+                        if cp_index < len(cp_normals):
+                            normal = cp_normals[cp_index]
+                    if normal is None:
+                        if face_normal is None:
+                            face_normal = _compute_triangle_face_normal_from_control_points(
+                                control_points,
+                                polygon[0],
+                                polygon[k],
+                                polygon[k + 1],
+                            )
+                        normal = face_normal
 
-                    uv = _get_fbx_polygon_vertex_uv(mesh, j, slot, uv_set_name)
-                    if uv is None:
-                        uv = _get_fbx_polygon_vertex_uv_fallback(mesh, j, slot, cp_index)
+                    uv = uv_resolver(j, slot, cp_index) if uv_resolver is not None else None
                     if uv is None:
                         uv = (0.0, 0.0)
                         uv_missing_count += 1
@@ -539,7 +629,11 @@ def _mesh_uses_multiple_materials(node, polygon_materials):
 
 
 def _compute_smooth_control_point_normals(mesh, control_points):
-    cp_normals = [np.zeros(3, dtype=np.float32) for _ in range(len(control_points))]
+    cp_count = len(control_points)
+    if cp_count <= 0:
+        return []
+
+    cp_normals = np.zeros((cp_count, 3), dtype=np.float32)
     for poly_idx in range(mesh.GetPolygonCount()):
         poly_size = mesh.GetPolygonSize(poly_idx)
         polygon = [mesh.GetPolygonVertex(poly_idx, k) for k in range(poly_size)]
@@ -547,22 +641,52 @@ def _compute_smooth_control_point_normals(mesh, control_points):
             continue
         for k in range(1, poly_size - 1):
             i0, i1, i2 = polygon[0], polygon[k], polygon[k + 1]
-            v0 = np.array([control_points[i0][0], control_points[i0][1], control_points[i0][2]], dtype=np.float32)
-            v1 = np.array([control_points[i1][0], control_points[i1][1], control_points[i1][2]], dtype=np.float32)
-            v2 = np.array([control_points[i2][0], control_points[i2][1], control_points[i2][2]], dtype=np.float32)
-            n = np.cross(v1 - v0, v2 - v0)
-            cp_normals[i0] += n
-            cp_normals[i1] += n
-            cp_normals[i2] += n
+            n = _compute_triangle_face_normal_from_control_points(control_points, i0, i1, i2, normalize=False)
+            cp_normals[i0, 0] += n[0]
+            cp_normals[i0, 1] += n[1]
+            cp_normals[i0, 2] += n[2]
+            cp_normals[i1, 0] += n[0]
+            cp_normals[i1, 1] += n[1]
+            cp_normals[i1, 2] += n[2]
+            cp_normals[i2, 0] += n[0]
+            cp_normals[i2, 1] += n[1]
+            cp_normals[i2, 2] += n[2]
 
-    out = []
-    for n in cp_normals:
-        length = np.linalg.norm(n)
-        if length > 0:
-            out.append([float(n[0] / length), float(n[1] / length), float(n[2] / length)])
-        else:
-            out.append(None)
+    lengths = np.linalg.norm(cp_normals, axis=1)
+    valid = lengths > 1e-12
+    cp_normals[valid] /= lengths[valid][:, None]
+
+    out = [None] * cp_count
+    valid_indices = np.nonzero(valid)[0]
+    for idx in valid_indices:
+        n = cp_normals[int(idx)]
+        out[int(idx)] = [float(n[0]), float(n[1]), float(n[2])]
     return out
+
+
+def _compute_triangle_face_normal_from_control_points(control_points, i0: int, i1: int, i2: int, normalize: bool = True):
+    p0 = control_points[i0]
+    p1 = control_points[i1]
+    p2 = control_points[i2]
+
+    ax = float(p1[0] - p0[0])
+    ay = float(p1[1] - p0[1])
+    az = float(p1[2] - p0[2])
+    bx = float(p2[0] - p0[0])
+    by = float(p2[1] - p0[1])
+    bz = float(p2[2] - p0[2])
+
+    nx = ay * bz - az * by
+    ny = az * bx - ax * bz
+    nz = ax * by - ay * bx
+    if not normalize:
+        return [nx, ny, nz]
+
+    length = float((nx * nx + ny * ny + nz * nz) ** 0.5)
+    if length <= 1e-12:
+        return [0.0, 1.0, 0.0]
+    inv = 1.0 / length
+    return [nx * inv, ny * inv, nz * inv]
 
 
 def _collect_fbx_material_textures(scene, file_path: str):
@@ -741,6 +865,89 @@ def _get_fbx_uv_set_name(mesh):
                 return str(first)
     except Exception:
         pass
+    return None
+
+
+def _build_fbx_uv_resolver(mesh, polygon_sizes, uv_set_name):
+    try:
+        if mesh.GetElementUVCount() <= 0:
+            return None
+        uv_elem = mesh.GetElementUV(0)
+        if uv_elem is None:
+            return None
+
+        mapping = uv_elem.GetMappingMode()
+        reference = uv_elem.GetReferenceMode()
+        direct = uv_elem.GetDirectArray()
+        index_arr = uv_elem.GetIndexArray()
+
+        map_enum = getattr(getattr(fbx, "FbxLayerElement", object), "EMappingMode", None)
+        ref_enum = getattr(getattr(fbx, "FbxLayerElement", object), "EReferenceMode", None)
+        if map_enum is None or ref_enum is None:
+            return None
+
+        direct_count = int(direct.GetCount()) if direct is not None else 0
+        if direct_count <= 0:
+            return None
+        direct_at = direct.GetAt
+
+        uses_index = reference in (ref_enum.eIndex, ref_enum.eIndexToDirect)
+        if uses_index:
+            if index_arr is None:
+                return None
+            index_count = int(index_arr.GetCount())
+            index_at = index_arr.GetAt
+        else:
+            index_count = 0
+            index_at = None
+
+        polygon_vertex_offsets = None
+        if mapping == map_enum.eByPolygonVertex:
+            polygon_vertex_offsets = [0] * len(polygon_sizes)
+            acc = 0
+            for idx, size in enumerate(polygon_sizes):
+                polygon_vertex_offsets[idx] = acc
+                acc += int(size)
+
+        def resolve_direct_index(map_index: int):
+            if map_index is None or map_index < 0:
+                return -1
+            if uses_index:
+                if map_index >= index_count:
+                    return -1
+                direct_index = int(index_at(int(map_index)))
+            else:
+                direct_index = int(map_index)
+            if direct_index < 0 or direct_index >= direct_count:
+                return -1
+            return direct_index
+
+        def uv_from_map_index(map_index: int):
+            direct_index = resolve_direct_index(map_index)
+            if direct_index < 0:
+                return None
+            uv = direct_at(direct_index)
+            return float(uv[0]), float(uv[1])
+
+        if mapping == map_enum.eByControlPoint:
+            return lambda polygon_index, vertex_index, cp_index: uv_from_map_index(cp_index)
+        if mapping == map_enum.eByPolygonVertex and polygon_vertex_offsets is not None:
+            return lambda polygon_index, vertex_index, cp_index: uv_from_map_index(
+                polygon_vertex_offsets[int(polygon_index)] + int(vertex_index)
+            )
+        if mapping == map_enum.eByPolygon:
+            return lambda polygon_index, vertex_index, cp_index: uv_from_map_index(int(polygon_index))
+        if mapping == map_enum.eAllSame:
+            uv_const = uv_from_map_index(0)
+            return lambda polygon_index, vertex_index, cp_index: uv_const
+    except Exception:
+        pass
+
+    if uv_set_name:
+        def _fallback_resolver(polygon_index, vertex_index, cp_index):
+            return _get_fbx_polygon_vertex_uv(mesh, polygon_index, vertex_index, uv_set_name)
+
+        return _fallback_resolver
     return None
 
 
