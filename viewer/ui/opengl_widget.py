@@ -46,7 +46,6 @@ from OpenGL.GL import (
     glBindTexture,
     glBlendFunc,
     glColor3f,
-    glColor4f,
     glClear,
     glClearColor,
     glDeleteProgram,
