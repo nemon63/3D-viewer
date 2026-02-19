@@ -159,6 +159,7 @@ uniform int uHasRough;
 uniform int uHasNormal;
 uniform int uUnlitTexturePreview;
 uniform int uAlphaMode;
+uniform int uUseBaseAlpha;
 uniform float uAlphaCutoff;
 uniform float uAmbientStrength;
 uniform int uFastMode;
@@ -245,10 +246,16 @@ vec3 computeDirectionalLight(vec3 N, vec3 V, vec3 albedo, float metallic, float 
 void main() {
     vec4 baseSample = (uHasBase == 1) ? texture2D(uBaseColorTex, vUv) : vec4(0.75, 0.75, 0.75, 1.0);
     vec3 base = baseSample.rgb;
-    float alpha = baseSample.a;
-
-    if (uAlphaMode == 1 && alpha < uAlphaCutoff) {
-        discard;
+    float alpha = 1.0;
+    if (uAlphaMode == 1) {
+        alpha = (uUseBaseAlpha == 1) ? baseSample.a : 1.0;
+        if (alpha < uAlphaCutoff) {
+            discard;
+        }
+        // Cutout should stay visually opaque after clipping.
+        alpha = 1.0;
+    } else if (uAlphaMode == 2) {
+        alpha = (uUseBaseAlpha == 1) ? baseSample.a : 1.0;
     }
     float metallic = (uHasMetal == 1) ? texture2D(uMetalTex, vUv).r : 0.0;
     float roughness = (uHasRough == 1) ? texture2D(uRoughTex, vUv).r : 0.55;
@@ -437,6 +444,7 @@ class OpenGLWidget(QOpenGLWidget):
         self.shadow_softness = 1.0
         self.directional_light_energy = 0.12
         self.alpha_render_mode = "cutout"
+        self.use_base_alpha_in_blend = False
         self._view_matrix = np.identity(4, dtype=np.float32)
 
         self._inertia_timer = QTimer(self)
@@ -659,7 +667,7 @@ class OpenGLWidget(QOpenGLWidget):
 
             if self.alpha_render_mode == "blend":
                 opaque_entries = [item for item in draw_entries if not item[2]]
-                transparent_entries = [item for item in draw_entries if item[2]]
+                transparent_entries = [item for item in draw_entries if item[2] and self.use_base_alpha_in_blend]
 
                 for draw_indices, tex_ids, has_alpha in opaque_entries:
                     self._set_material_uniforms(tex_ids, has_alpha)
@@ -741,12 +749,16 @@ class OpenGLWidget(QOpenGLWidget):
         self._set_int_uniform("uHasRough", 1 if rough_tex else 0)
         self._set_int_uniform("uHasNormal", 1 if normal_tex else 0)
         alpha_mode = 0
+        use_base_alpha = 0
         if has_base_alpha:
             if self.alpha_render_mode == "blend":
                 alpha_mode = 2
+                use_base_alpha = 1 if self.use_base_alpha_in_blend else 0
             elif self.alpha_render_mode == "cutout":
                 alpha_mode = 1
+                use_base_alpha = 1
         self._set_int_uniform("uAlphaMode", alpha_mode)
+        self._set_int_uniform("uUseBaseAlpha", use_base_alpha)
 
     def _draw_mesh_indices(self, draw_indices):
         draw_indices = np.asarray(draw_indices, dtype=np.uint32).reshape(-1)
@@ -1312,6 +1324,10 @@ class OpenGLWidget(QOpenGLWidget):
         if mode not in ("cutout", "blend"):
             mode = "cutout"
         self.alpha_render_mode = mode
+        self.update()
+
+    def set_use_base_alpha_in_blend(self, enabled: bool):
+        self.use_base_alpha_in_blend = bool(enabled)
         self.update()
 
     def _request_projection_refresh(self):

@@ -19,7 +19,7 @@ def rank_texture_candidates(candidates, model_name=""):
         if model_name and model_name in name:
             value += 5
 
-        diffuse_tokens = ("dif", "diff", "diffuse", "albedo", "basecolor", "base_color", "color", "col")
+        diffuse_tokens = ("dif", "diff", "diffuse", "albedo", "basecolor", "base_color", "color")
         if any(token in name for token in diffuse_tokens):
             value += 50
 
@@ -68,7 +68,7 @@ def classify_texture_channel(path: str) -> str:
         return CHANNEL_ROUGHNESS
     if any(token in name for token in ("metal", "_met", "_metallic", "metalness")):
         return CHANNEL_METAL
-    if any(token in name for token in ("dif", "diff", "diffuse", "albedo", "basecolor", "base_color", "color", "col")):
+    if any(token in name for token in ("dif", "diff", "diffuse", "albedo", "basecolor", "base_color", "color")):
         return CHANNEL_BASECOLOR
     return CHANNEL_OTHER
 

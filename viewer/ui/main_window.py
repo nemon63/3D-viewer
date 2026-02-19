@@ -236,6 +236,9 @@ class MainWindow(QMainWindow):
         self.alpha_mode_combo.addItem("Alpha Blend", "blend")
         self.alpha_mode_combo.currentIndexChanged.connect(self._on_alpha_mode_changed)
         material_layout.addRow("Alpha Mode", self.alpha_mode_combo)
+        self.blend_base_alpha_checkbox = QCheckBox("Use BaseColor alpha in Blend", self)
+        self.blend_base_alpha_checkbox.stateChanged.connect(self._on_blend_base_alpha_changed)
+        material_layout.addRow(self.blend_base_alpha_checkbox)
         material_layout.addRow("Значение", self.alpha_cutoff_label)
         controls_tabs.addTab(material_group, "Материалы")
 
@@ -413,6 +416,7 @@ class MainWindow(QMainWindow):
 
         self._on_alpha_cutoff_changed(self.alpha_cutoff_slider.value())
         self._on_alpha_mode_changed(self.alpha_mode_combo.currentIndex())
+        self._on_blend_base_alpha_changed(self.blend_base_alpha_checkbox.checkState())
         self._on_rotate_speed_changed(self.rotate_speed_slider.value())
         self._on_zoom_speed_changed(self.zoom_speed_slider.value())
         self._on_ambient_changed(self.ambient_slider.value())
@@ -530,6 +534,7 @@ class MainWindow(QMainWindow):
         shadow_softness = self.settings.value("view/shadow_softness_slider", 100, type=int)
         alpha_cutoff = self.settings.value("view/alpha_cutoff_slider", 50, type=int)
         alpha_mode = self.settings.value("view/alpha_mode", "cutout", type=str)
+        blend_base_alpha = self.settings.value("view/blend_base_alpha", False, type=bool)
         ui_theme = self.settings.value("view/ui_theme", "graphite", type=str)
         bg_color_hex = self.settings.value("view/bg_color_hex", "#14233f", type=str)
         projection = self.settings.value("view/projection_mode", "perspective", type=str)
@@ -558,6 +563,7 @@ class MainWindow(QMainWindow):
         alpha_mode_idx = self.alpha_mode_combo.findData(alpha_mode)
         if alpha_mode_idx >= 0:
             self.alpha_mode_combo.setCurrentIndex(alpha_mode_idx)
+        self.blend_base_alpha_checkbox.setChecked(bool(blend_base_alpha))
 
         theme_idx = self.theme_combo.findData(ui_theme)
         if theme_idx >= 0:
@@ -964,10 +970,20 @@ class MainWindow(QMainWindow):
         mode = self.alpha_mode_combo.currentData() or "cutout"
         self.gl_widget.set_alpha_render_mode(mode)
         is_cutout = mode == "cutout"
+        is_blend = mode == "blend"
         self.alpha_cutoff_slider.setEnabled(is_cutout)
         self.alpha_cutoff_label.setEnabled(is_cutout)
+        self.blend_base_alpha_checkbox.setEnabled(is_blend)
+        self.gl_widget.set_use_base_alpha_in_blend(is_blend and self.blend_base_alpha_checkbox.isChecked())
         if self._settings_ready:
             self.settings.setValue("view/alpha_mode", mode)
+
+    def _on_blend_base_alpha_changed(self, state: int):
+        enabled = state == Qt.Checked
+        mode = self.alpha_mode_combo.currentData() or "cutout"
+        self.gl_widget.set_use_base_alpha_in_blend(mode == "blend" and enabled)
+        if self._settings_ready:
+            self.settings.setValue("view/blend_base_alpha", bool(enabled))
 
     def _on_projection_changed(self):
         mode = self.projection_combo.currentData()
