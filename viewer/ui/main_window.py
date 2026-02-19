@@ -604,8 +604,7 @@ class MainWindow(QMainWindow):
             self._render_validation_panel()
             return
 
-        texture_paths = dict(self.gl_widget.last_texture_paths or {})
-        texture_sets = dict(self.gl_widget.last_texture_sets or {})
+        texture_paths, texture_sets = self._collect_effective_texture_channels()
         debug = self.gl_widget.last_debug_info or {}
         triangles = int(self.gl_widget.indices.size // 3) if self.gl_widget.indices.size else 0
 
@@ -1118,6 +1117,37 @@ class MainWindow(QMainWindow):
                 combo.setCurrentIndex(0)
             combo.blockSignals(False)
 
+    def _collect_effective_texture_channels(self):
+        texture_paths = dict(self.gl_widget.last_texture_paths or {})
+        overrides = dict(getattr(self.gl_widget, "channel_overrides", {}) or {})
+        locked_channels = {ch for ch, value in overrides.items() if value is not None}
+        for channel, value in overrides.items():
+            if value is not None:
+                texture_paths[channel] = value or ""
+
+        if "basecolor" not in locked_channels and not texture_paths.get("basecolor") and self.gl_widget.last_texture_path:
+            texture_paths["basecolor"] = self.gl_widget.last_texture_path
+
+        for submesh in self.gl_widget.submeshes or []:
+            sub_paths = submesh.get("texture_paths") or {}
+            for channel, path in sub_paths.items():
+                if channel in locked_channels:
+                    continue
+                if path and not texture_paths.get(channel):
+                    texture_paths[channel] = path
+
+        texture_sets = {
+            str(channel): list(paths or [])
+            for channel, paths in (self.gl_widget.last_texture_sets or {}).items()
+        }
+        for channel, path in texture_paths.items():
+            if not path:
+                continue
+            channel_paths = texture_sets.setdefault(channel, [])
+            if path not in channel_paths:
+                channel_paths.insert(0, path)
+        return texture_paths, texture_sets
+
     def _on_material_channel_changed(self, channel):
         self._apply_channel_texture(channel)
 
@@ -1156,7 +1186,7 @@ class MainWindow(QMainWindow):
         def _name(path):
             return os.path.basename(path) if path else "-"
 
-        tex_paths = self.gl_widget.last_texture_paths or {}
+        tex_paths, _ = self._collect_effective_texture_channels()
         lines = [
             f"Model: {os.path.basename(active_path) if active_path else '-'}",
             f"Vertices: {vertices:,}  Triangles: {triangles:,}",

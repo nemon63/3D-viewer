@@ -2,6 +2,14 @@ import os
 import re
 from typing import Dict, List, Tuple
 
+from viewer.utils.texture_utils import (
+    CHANNEL_BASECOLOR,
+    CHANNEL_METAL,
+    CHANNEL_NORMAL,
+    CHANNEL_ROUGHNESS,
+    classify_texture_channel,
+)
+
 try:
     from PIL import Image
 except Exception:
@@ -262,10 +270,13 @@ def _iter_texture_paths(texture_paths: dict, texture_sets: dict):
 def _detect_channel_presence(texture_paths: dict, texture_sets: dict) -> Dict[str, bool]:
     presence = {
         "basecolor": False,
+        "diffuse": False,
+        "albedo": False,
         "normal": False,
         "metal": False,
         "metallic": False,
         "roughness": False,
+        "rough": False,
         "ao": False,
         "occlusion": False,
         "opacity": False,
@@ -275,15 +286,24 @@ def _detect_channel_presence(texture_paths: dict, texture_sets: dict) -> Dict[st
 
     for ch, p in (texture_paths or {}).items():
         if p:
-            key = str(ch).strip().lower()
-            presence[key] = True
-            if key == "metal":
-                presence["metallic"] = True
-            if key == "ao":
-                presence["occlusion"] = True
+            _mark_channel_presence(presence, str(ch).strip().lower())
+
+    for ch, paths in (texture_sets or {}).items():
+        if paths:
+            _mark_channel_presence(presence, str(ch).strip().lower())
 
     names = [os.path.basename(p).lower() for p in _iter_texture_paths(texture_paths, texture_sets)]
     for name in names:
+        guessed = classify_texture_channel(name)
+        if guessed == CHANNEL_BASECOLOR:
+            _mark_channel_presence(presence, "basecolor")
+        elif guessed == CHANNEL_NORMAL:
+            _mark_channel_presence(presence, "normal")
+        elif guessed == CHANNEL_METAL:
+            _mark_channel_presence(presence, "metal")
+        elif guessed == CHANNEL_ROUGHNESS:
+            _mark_channel_presence(presence, "roughness")
+
         stem = os.path.splitext(name)[0]
         if "_orm" in stem or stem.endswith("orm"):
             presence["orm"] = True
@@ -302,9 +322,45 @@ def _detect_channel_presence(texture_paths: dict, texture_sets: dict) -> Dict[st
     return presence
 
 
+def _mark_channel_presence(presence: dict, channel: str):
+    key = str(channel or "").strip().lower()
+    if not key:
+        return
+    alias_map = {
+        "base": "basecolor",
+        "base_color": "basecolor",
+        "diff": "basecolor",
+        "diffuse": "basecolor",
+        "color": "basecolor",
+        "albedo": "basecolor",
+        "nrm": "normal",
+        "nor": "normal",
+        "metalness": "metal",
+        "met": "metal",
+        "rough": "roughness",
+        "rgh": "roughness",
+    }
+    key = alias_map.get(key, key)
+    presence[key] = True
+    if key == "basecolor":
+        presence["diffuse"] = True
+        presence["albedo"] = True
+    if key == "metal":
+        presence["metallic"] = True
+    if key == "roughness":
+        presence["rough"] = True
+    if key == "ao":
+        presence["occlusion"] = True
+
+
 def _is_channel_present(channel: str, presence: dict) -> bool:
     ch = str(channel).strip().lower()
     aliases = {
+        "basecolor": ("basecolor", "diffuse", "albedo"),
+        "diffuse": ("diffuse", "basecolor", "albedo"),
+        "albedo": ("albedo", "basecolor", "diffuse"),
+        "roughness": ("roughness", "rough"),
+        "rough": ("rough", "roughness"),
         "metallic": ("metallic", "metal"),
         "metal": ("metal", "metallic"),
         "occlusion": ("occlusion", "ao"),
