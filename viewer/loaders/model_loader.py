@@ -1,4 +1,5 @@
 import os
+import re
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -59,6 +60,7 @@ def _load_trimesh_payload(file_path: str, fast_mode: bool = False) -> MeshPayloa
         if texcoords.ndim != 2 or texcoords.shape[1] != 2 or texcoords.shape[0] != vertices.shape[0]:
             texcoords = np.array([], dtype=np.float32)
 
+        model_hint = os.path.splitext(os.path.basename(file_path))[0]
         texture_candidates = find_texture_candidates(file_path)
         texture_sets = group_texture_candidates(texture_candidates)
         return MeshPayload(
@@ -73,7 +75,7 @@ def _load_trimesh_payload(file_path: str, fast_mode: bool = False) -> MeshPayloa
                     "indices": np.array(indices, dtype=np.uint32),
                     "object_name": "scene",
                     "material_name": "default",
-                    "texture_paths": _select_texture_paths(texture_sets),
+                    "texture_paths": _select_texture_paths(texture_sets, hint_names=[model_hint, "scene"]),
                 }
             ],
             debug_info={
@@ -90,6 +92,7 @@ def _load_trimesh_payload(file_path: str, fast_mode: bool = False) -> MeshPayloa
         recompute_normals=not fast_mode,
     )
     texcoords = _extract_trimesh_uv(scene_or_mesh)
+    model_hint = os.path.splitext(os.path.basename(file_path))[0]
     texture_candidates = find_texture_candidates(file_path)
     texture_sets = group_texture_candidates(texture_candidates)
     return MeshPayload(
@@ -104,7 +107,7 @@ def _load_trimesh_payload(file_path: str, fast_mode: bool = False) -> MeshPayloa
                 "indices": np.array(indices, dtype=np.uint32),
                 "object_name": "mesh",
                 "material_name": "default",
-                "texture_paths": _select_texture_paths(texture_sets),
+                "texture_paths": _select_texture_paths(texture_sets, hint_names=[model_hint, "mesh"]),
             }
         ],
         debug_info={"loader": "trimesh_mesh", "uv_count": int(texcoords.shape[0]) if texcoords.ndim == 2 else 0},
@@ -172,16 +175,16 @@ def _extract_trimesh_uv(mesh):
     return uv_arr[:, :2]
 
 
-def _select_texture_paths(texture_sets: dict):
+def _select_texture_paths(texture_sets: dict, hint_names=None):
     return {
-        "basecolor": (texture_sets.get("basecolor") or [""])[0],
-        "metal": (texture_sets.get("metal") or [""])[0],
-        "roughness": (texture_sets.get("roughness") or [""])[0],
-        "normal": (texture_sets.get("normal") or [""])[0],
+        "basecolor": _pick_best_texture_path(texture_sets.get(CHANNEL_BASECOLOR) or [], hint_names=hint_names),
+        "metal": _pick_best_texture_path(texture_sets.get(CHANNEL_METAL) or [], hint_names=hint_names),
+        "roughness": _pick_best_texture_path(texture_sets.get(CHANNEL_ROUGHNESS) or [], hint_names=hint_names),
+        "normal": _pick_best_texture_path(texture_sets.get(CHANNEL_NORMAL) or [], hint_names=hint_names),
     }
 
 
-def _merge_texture_paths(primary_paths: dict, fallback_sets: dict):
+def _merge_texture_paths(primary_paths: dict, fallback_sets: dict, hint_names=None):
     merged = dict(primary_paths or {})
     channel_map = (
         ("basecolor", CHANNEL_BASECOLOR),
@@ -193,8 +196,82 @@ def _merge_texture_paths(primary_paths: dict, fallback_sets: dict):
         if merged.get(out_channel):
             continue
         candidates = fallback_sets.get(fallback_channel) or []
-        merged[out_channel] = candidates[0] if candidates else ""
+        merged[out_channel] = _pick_best_texture_path(candidates, hint_names=hint_names)
     return merged
+
+
+_GENERIC_HINT_TOKENS = {
+    "mat",
+    "material",
+    "mtl",
+    "geo",
+    "mesh",
+    "obj",
+    "default",
+    "surface",
+    "shader",
+}
+
+
+def _extract_hint_tokens(hint_names=None):
+    out = []
+    seen = set()
+    for raw_name in hint_names or []:
+        if not raw_name:
+            continue
+        name = str(raw_name).strip().lower()
+        if not name:
+            continue
+        for suffix in ("_material", "-material", ".material", "_mat", "-mat", ".mat"):
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+                break
+        for token in re.split(r"[^a-z0-9]+", name):
+            if not token or token in _GENERIC_HINT_TOKENS:
+                continue
+            if token in seen:
+                continue
+            seen.add(token)
+            out.append(token)
+    return out
+
+
+def _texture_match_score(path: str, hint_tokens):
+    if not hint_tokens:
+        return 0
+    stem = os.path.splitext(os.path.basename(path))[0].lower()
+    wrapped = f"_{stem}_"
+    score = 0
+    for hint in hint_tokens:
+        if stem == hint:
+            score += 220
+        elif stem.startswith(f"{hint}_") or stem.startswith(f"{hint}-"):
+            score += 160
+        elif f"_{hint}_" in wrapped:
+            score += 90
+        elif hint in stem:
+            score += 40
+    return score
+
+
+def _pick_best_texture_path(candidates, hint_names=None):
+    paths = list(candidates or [])
+    if not paths:
+        return ""
+    hint_tokens = _extract_hint_tokens(hint_names)
+    if not hint_tokens:
+        return paths[0]
+
+    best_path = paths[0]
+    best_score = _texture_match_score(best_path, hint_tokens)
+    for path in paths[1:]:
+        score = _texture_match_score(path, hint_tokens)
+        if score > best_score:
+            best_path = path
+            best_score = score
+    if best_score <= 0:
+        return paths[0]
+    return best_path
 
 
 def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
@@ -245,7 +322,10 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
                 continue
             material_uid = group["material_uid"]
             texture_sets = material_textures.get(material_uid, {})
-            material_paths = _select_texture_paths(texture_sets)
+            material_paths = _select_texture_paths(
+                texture_sets,
+                hint_names=[group.get("material_name"), group.get("object_name")],
+            )
             submeshes.append(
                 {
                     "indices": sub_indices,
@@ -269,15 +349,21 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
             texture_sets[CHANNEL_BASECOLOR] = texture_candidates[:1]
 
         if submeshes:
+            model_hint = os.path.splitext(os.path.basename(file_path))[0]
             for submesh in submeshes:
-                submesh["texture_paths"] = _merge_texture_paths(submesh.get("texture_paths") or {}, texture_sets)
+                submesh["texture_paths"] = _merge_texture_paths(
+                    submesh.get("texture_paths") or {},
+                    texture_sets,
+                    hint_names=[submesh.get("material_name"), submesh.get("object_name"), model_hint],
+                )
         else:
+            model_hint = os.path.splitext(os.path.basename(file_path))[0]
             submeshes = [
                 {
                     "indices": np.array(indices, dtype=np.uint32),
                     "object_name": "fbx",
                     "material_name": "default",
-                    "texture_paths": _select_texture_paths(texture_sets),
+                    "texture_paths": _select_texture_paths(texture_sets, hint_names=[model_hint]),
                 }
             ]
 
@@ -551,7 +637,10 @@ def _collect_material_texture_sets(material, model_dir: str):
         except Exception:
             continue
 
-    ranked = rank_texture_candidates(candidates, model_name=str(material.GetName() or "").lower())
+    material_name = str(material.GetName() or "").lower()
+    hint_tokens = _extract_hint_tokens([material_name])
+    material_hint = hint_tokens[0] if hint_tokens else material_name
+    ranked = rank_texture_candidates(candidates, model_name=material_hint)
     return group_texture_candidates(ranked)
 
 

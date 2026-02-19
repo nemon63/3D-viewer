@@ -62,7 +62,7 @@ def rank_texture_candidates(candidates, model_name=""):
 
 def classify_texture_channel(path: str) -> str:
     name = os.path.basename(path).lower()
-    if any(token in name for token in ("normal", "_nrm", "_nor", "_nm", "normalmap")):
+    if any(token in name for token in ("normal", "_nrm", "_nor", "_nm", "_nml", "normalmap")):
         return CHANNEL_NORMAL
     if any(token in name for token in ("rough", "_rgh", "_roughness", "gloss", "_gls")):
         return CHANNEL_ROUGHNESS
