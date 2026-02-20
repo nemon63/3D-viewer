@@ -78,6 +78,7 @@ class MainWindow(QMainWindow):
         self.material_target_combo = None
         self.material_targets = []
         self.texture_set_combo = None
+        self.normal_space_combo = None
         self._texture_set_profiles = []
         self._syncing_texture_set_ui = False
         self._syncing_material_ui = False
@@ -273,6 +274,12 @@ class MainWindow(QMainWindow):
         self.alpha_mode_combo.addItem("Alpha Blend", "blend")
         self.alpha_mode_combo.currentIndexChanged.connect(self._on_alpha_mode_changed)
         material_layout.addRow("Alpha Mode", self.alpha_mode_combo)
+        self.normal_space_combo = QComboBox(self)
+        self.normal_space_combo.addItem("Auto", "auto")
+        self.normal_space_combo.addItem("Unity (+Y)", "unity")
+        self.normal_space_combo.addItem("Unreal (-Y)", "unreal")
+        self.normal_space_combo.currentIndexChanged.connect(self._on_normal_space_changed)
+        material_layout.addRow("Normal Space", self.normal_space_combo)
         self.blend_base_alpha_checkbox = QCheckBox("Use BaseColor alpha in Blend", self)
         self.blend_base_alpha_checkbox.stateChanged.connect(self._on_blend_base_alpha_changed)
         material_layout.addRow(self.blend_base_alpha_checkbox)
@@ -456,6 +463,7 @@ class MainWindow(QMainWindow):
         self._on_alpha_cutoff_changed(self.alpha_cutoff_slider.value())
         self._on_alpha_blend_changed(self.alpha_blend_slider.value())
         self._on_alpha_mode_changed(self.alpha_mode_combo.currentIndex())
+        self._on_normal_space_changed(self.normal_space_combo.currentIndex())
         self._on_blend_base_alpha_changed(self.blend_base_alpha_checkbox.checkState())
         self._on_rotate_speed_changed(self.rotate_speed_slider.value())
         self._on_zoom_speed_changed(self.zoom_speed_slider.value())
@@ -766,6 +774,7 @@ class MainWindow(QMainWindow):
         alpha_cutoff = self.settings.value("view/alpha_cutoff_slider", 50, type=int)
         alpha_blend = self.settings.value("view/alpha_blend_slider", 100, type=int)
         alpha_mode = self.settings.value("view/alpha_mode", "cutout", type=str)
+        normal_space = self.settings.value("view/normal_map_space", "auto", type=str)
         blend_base_alpha = self.settings.value("view/blend_base_alpha", False, type=bool)
         ui_theme = self.settings.value("view/ui_theme", "graphite", type=str)
         bg_color_hex = self.settings.value("view/bg_color_hex", "#14233f", type=str)
@@ -796,6 +805,9 @@ class MainWindow(QMainWindow):
         alpha_mode_idx = self.alpha_mode_combo.findData(alpha_mode)
         if alpha_mode_idx >= 0:
             self.alpha_mode_combo.setCurrentIndex(alpha_mode_idx)
+        normal_space_idx = self.normal_space_combo.findData(normal_space)
+        if normal_space_idx >= 0:
+            self.normal_space_combo.setCurrentIndex(normal_space_idx)
         self.blend_base_alpha_checkbox.setChecked(bool(blend_base_alpha))
 
         theme_idx = self.theme_combo.findData(ui_theme)
@@ -1475,6 +1487,7 @@ class MainWindow(QMainWindow):
             f"Metal: {_name(tex_paths.get('metal', ''))}",
             f"Rough: {_name(tex_paths.get('roughness', ''))}",
             f"Normal: {_name(tex_paths.get('normal', ''))}",
+            f"Normal space: {self.gl_widget.normal_map_space}",
             f"Alpha: {self.gl_widget.alpha_render_mode}  Base alpha: {'on' if self.gl_widget.use_base_alpha_in_blend else 'off'}  Blend: {self.gl_widget.alpha_blend_opacity:.2f}",
             f"Projection: {self.gl_widget.projection_mode}  Shadows: {self.gl_widget.shadow_status_message}",
         ]
@@ -1534,6 +1547,13 @@ class MainWindow(QMainWindow):
         self.gl_widget.set_use_base_alpha_in_blend(mode == "blend" and enabled)
         if self._settings_ready:
             self.settings.setValue("view/blend_base_alpha", bool(enabled))
+
+    def _on_normal_space_changed(self, _value: int):
+        mode = (self.normal_space_combo.currentData() or "auto") if self.normal_space_combo is not None else "auto"
+        self.gl_widget.set_normal_map_space(mode)
+        if self._settings_ready:
+            self.settings.setValue("view/normal_map_space", str(mode))
+        self._refresh_overlay_data()
 
     def _on_projection_changed(self):
         mode = self.projection_combo.currentData()

@@ -13,6 +13,7 @@ from viewer.utils.texture_utils import (
     CHANNEL_BASECOLOR,
     CHANNEL_METAL,
     CHANNEL_NORMAL,
+    CHANNEL_ORM,
     CHANNEL_ROUGHNESS,
     find_texture_candidates,
     group_texture_candidates,
@@ -26,7 +27,7 @@ except ImportError:
     fbx = None
 
 
-_PAYLOAD_CACHE_VERSION = "v4"
+_PAYLOAD_CACHE_VERSION = "v5"
 _PAYLOAD_CACHE_DIR = os.path.join(".cache", "payload_cache")
 _SMOOTH_FALLBACK_MAX_POLYGONS = 250000
 
@@ -235,11 +236,34 @@ def _extract_trimesh_uv(mesh):
 
 
 def _select_texture_paths(texture_sets: dict, hint_names=None):
+    base = _pick_best_texture_path(texture_sets.get(CHANNEL_BASECOLOR) or [], hint_names=hint_names)
+    metal = _pick_best_texture_path(texture_sets.get(CHANNEL_METAL) or [], hint_names=hint_names)
+    rough = _pick_best_texture_path(texture_sets.get(CHANNEL_ROUGHNESS) or [], hint_names=hint_names)
+    normal = _pick_best_texture_path(texture_sets.get(CHANNEL_NORMAL) or [], hint_names=hint_names)
+    orm = _pick_best_texture_path(texture_sets.get(CHANNEL_ORM) or [], hint_names=hint_names)
+
+    # Unreal-style ORM packing: R=AO, G=Roughness, B=Metallic.
+    # If dedicated metal/rough maps are absent, source them from ORM with channel swizzle.
+    metal_swizzle = 0
+    rough_swizzle = 0
+    if orm:
+        if not metal:
+            metal = orm
+            metal_swizzle = 2
+        if not rough:
+            rough = orm
+            rough_swizzle = 1
+
     return {
-        "basecolor": _pick_best_texture_path(texture_sets.get(CHANNEL_BASECOLOR) or [], hint_names=hint_names),
-        "metal": _pick_best_texture_path(texture_sets.get(CHANNEL_METAL) or [], hint_names=hint_names),
-        "roughness": _pick_best_texture_path(texture_sets.get(CHANNEL_ROUGHNESS) or [], hint_names=hint_names),
-        "normal": _pick_best_texture_path(texture_sets.get(CHANNEL_NORMAL) or [], hint_names=hint_names),
+        "basecolor": base,
+        "metal": metal,
+        "roughness": rough,
+        "normal": normal,
+        "orm": orm,
+        "channel_swizzles": {
+            "metal": int(metal_swizzle),
+            "roughness": int(rough_swizzle),
+        },
     }
 
 
@@ -256,6 +280,23 @@ def _merge_texture_paths(primary_paths: dict, fallback_sets: dict, hint_names=No
             continue
         candidates = fallback_sets.get(fallback_channel) or []
         merged[out_channel] = _pick_best_texture_path(candidates, hint_names=hint_names)
+
+    orm_path = merged.get("orm") or _pick_best_texture_path(fallback_sets.get(CHANNEL_ORM) or [], hint_names=hint_names)
+    merged["orm"] = orm_path
+    if orm_path:
+        if not merged.get("metal"):
+            merged["metal"] = orm_path
+        if not merged.get("roughness"):
+            merged["roughness"] = orm_path
+    swizzles = dict((merged.get("channel_swizzles") or {}))
+    if not swizzles:
+        swizzles = {"metal": 0, "roughness": 0}
+    if orm_path:
+        if merged.get("metal") == orm_path:
+            swizzles["metal"] = 2
+        if merged.get("roughness") == orm_path:
+            swizzles["roughness"] = 1
+    merged["channel_swizzles"] = {"metal": int(swizzles.get("metal", 0)), "roughness": int(swizzles.get("roughness", 0))}
     return merged
 
 
@@ -778,6 +819,7 @@ def _collect_material_texture_sets(material, model_dir: str):
             "metal": [],
             "roughness": [],
             "normal": [],
+            "orm": [],
             "other": [],
         }
 

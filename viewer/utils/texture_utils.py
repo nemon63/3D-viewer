@@ -1,4 +1,5 @@
 import os
+import re
 
 
 TEXTURE_EXTS = (".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff")
@@ -10,6 +11,7 @@ CHANNEL_BASECOLOR = "basecolor"
 CHANNEL_METAL = "metal"
 CHANNEL_ROUGHNESS = "roughness"
 CHANNEL_NORMAL = "normal"
+CHANNEL_ORM = "orm"
 CHANNEL_OTHER = "other"
 
 
@@ -64,13 +66,30 @@ def rank_texture_candidates(candidates, model_name=""):
 
 def classify_texture_channel(path: str) -> str:
     name = os.path.basename(path).lower()
-    if any(token in name for token in ("normal", "_nrm", "_nor", "_nm", "_nml", "normalmap")):
+    stem = os.path.splitext(name)[0]
+    tokens = [t for t in re.split(r"[^a-z0-9]+", stem) if t]
+    last_token = tokens[-1] if tokens else ""
+    if "_orm" in stem or stem.endswith("orm"):
+        return CHANNEL_ORM
+    if any(token in name for token in ("normal", "_nrm", "_nor", "_nm", "_nml", "normalmap")) or last_token in (
+        "n",
+        "nm",
+        "nrm",
+        "nor",
+        "nml",
+        "normal",
+    ):
         return CHANNEL_NORMAL
     if any(token in name for token in ("rough", "_rgh", "_roughness", "gloss", "_gls")):
         return CHANNEL_ROUGHNESS
     if any(token in name for token in ("metal", "_met", "_metallic", "metalness")):
         return CHANNEL_METAL
-    if any(token in name for token in ("dif", "diff", "diffuse", "albedo", "basecolor", "base_color", "color")):
+    if any(token in name for token in ("dif", "diff", "diffuse", "albedo", "basecolor", "base_color", "color", "_bc")) or last_token in (
+        "bc",
+        "base",
+        "basecolor",
+        "albedo",
+    ):
         return CHANNEL_BASECOLOR
     return CHANNEL_OTHER
 
@@ -81,6 +100,7 @@ def group_texture_candidates(candidates):
         CHANNEL_METAL: [],
         CHANNEL_ROUGHNESS: [],
         CHANNEL_NORMAL: [],
+        CHANNEL_ORM: [],
         CHANNEL_OTHER: [],
     }
     for path in candidates:

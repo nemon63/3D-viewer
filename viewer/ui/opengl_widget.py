@@ -159,6 +159,9 @@ uniform int uHasNormal;
 uniform int uUnlitTexturePreview;
 uniform int uAlphaMode;
 uniform int uUseBaseAlpha;
+uniform int uMetalChannel;
+uniform int uRoughChannel;
+uniform int uFlipNormalY;
 uniform float uAlphaCutoff;
 uniform float uBlendOpacity;
 uniform float uAmbientStrength;
@@ -196,6 +199,19 @@ float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
 
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+}
+
+float sampleChannel(vec4 texel, int channelIdx) {
+    if (channelIdx == 1) {
+        return texel.g;
+    }
+    if (channelIdx == 2) {
+        return texel.b;
+    }
+    if (channelIdx == 3) {
+        return texel.a;
+    }
+    return texel.r;
 }
 
 float computeShadow(vec3 N, vec3 L) {
@@ -262,14 +278,17 @@ void main() {
             alpha = blendValue;
         }
     }
-    float metallic = (uHasMetal == 1) ? texture2D(uMetalTex, vUv).r : 0.0;
-    float roughness = (uHasRough == 1) ? texture2D(uRoughTex, vUv).r : 0.55;
+    float metallic = (uHasMetal == 1) ? sampleChannel(texture2D(uMetalTex, vUv), uMetalChannel) : 0.0;
+    float roughness = (uHasRough == 1) ? sampleChannel(texture2D(uRoughTex, vUv), uRoughChannel) : 0.55;
     roughness = clamp(roughness, 0.05, 1.0);
     metallic = clamp(metallic, 0.0, 1.0);
 
     vec3 N = normalize(vNormalView);
     if (uHasNormal == 1) {
         vec3 nMap = texture2D(uNormalTex, vUv).xyz * 2.0 - 1.0;
+        if (uFlipNormalY == 1) {
+            nMap.y = -nMap.y;
+        }
         // Tangent space is not available in this fixed-function bridge, so apply as soft perturbation.
         N = normalize(mix(N, normalize(vec3(nMap.xy, abs(nMap.z))), 0.35));
     }
@@ -452,6 +471,7 @@ class OpenGLWidget(QOpenGLWidget):
         self.alpha_render_mode = "cutout"
         self.use_base_alpha_in_blend = False
         self.alpha_blend_opacity = 1.0
+        self.normal_map_space = "auto"
         self._view_matrix = np.identity(4, dtype=np.float32)
         self.overlay_visible = False
         self.overlay_lines = []
@@ -687,10 +707,15 @@ class OpenGLWidget(QOpenGLWidget):
             draw_entries = []
             if self.submeshes:
                 for submesh in self.submeshes:
-                    tex_ids, has_alpha = self._resolve_submesh_textures(submesh)
-                    draw_entries.append((submesh["indices"], tex_ids, has_alpha))
+                    tex_ids, has_alpha, swizzles = self._resolve_submesh_textures(submesh)
+                    draw_entries.append((submesh["indices"], tex_ids, has_alpha, swizzles))
             else:
-                draw_entries.append((self.indices, self.texture_ids, self.base_texture_has_alpha))
+                global_paths = self.get_effective_texture_paths()
+                swizzles = {
+                    "metal": self._default_channel_swizzle(CHANNEL_METAL, global_paths.get(CHANNEL_METAL, "")),
+                    "roughness": self._default_channel_swizzle(CHANNEL_ROUGH, global_paths.get(CHANNEL_ROUGH, "")),
+                }
+                draw_entries.append((self.indices, self.texture_ids, self.base_texture_has_alpha, swizzles))
 
             if self.alpha_render_mode == "blend":
                 opaque_entries = []
@@ -704,20 +729,20 @@ class OpenGLWidget(QOpenGLWidget):
                     else:
                         opaque_entries.append(entry)
 
-                for draw_indices, tex_ids, has_alpha in opaque_entries:
-                    self._set_material_uniforms(tex_ids, has_alpha)
+                for draw_indices, tex_ids, has_alpha, swizzles in opaque_entries:
+                    self._set_material_uniforms(tex_ids, has_alpha, swizzles)
                     self._draw_mesh_indices(draw_indices)
 
                 if transparent_entries:
                     glEnable(GL_BLEND)
                     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-                    for draw_indices, tex_ids, has_alpha in transparent_entries:
-                        self._set_material_uniforms(tex_ids, has_alpha)
+                    for draw_indices, tex_ids, has_alpha, swizzles in transparent_entries:
+                        self._set_material_uniforms(tex_ids, has_alpha, swizzles)
                         self._draw_mesh_indices(draw_indices)
                     glDisable(GL_BLEND)
             else:
-                for draw_indices, tex_ids, has_alpha in draw_entries:
-                    self._set_material_uniforms(tex_ids, has_alpha)
+                for draw_indices, tex_ids, has_alpha, swizzles in draw_entries:
+                    self._set_material_uniforms(tex_ids, has_alpha, swizzles)
                     self._draw_mesh_indices(draw_indices)
         finally:
             self._unbind_texture_units()
@@ -765,6 +790,7 @@ class OpenGLWidget(QOpenGLWidget):
         self._set_sampler_uniform("uShadowMap", 4)
         self._set_int_uniform("uUnlitTexturePreview", 1 if self.unlit_texture_preview else 0)
         self._set_int_uniform("uFastMode", 1 if self.fast_mode else 0)
+        self._set_int_uniform("uFlipNormalY", 1 if self._normal_y_flip_enabled() else 0)
         self._set_float_uniform("uAlphaCutoff", self.alpha_cutoff)
         self._set_float_uniform("uBlendOpacity", self.alpha_blend_opacity)
         self._set_float_uniform("uAmbientStrength", self.ambient_strength)
@@ -793,7 +819,7 @@ class OpenGLWidget(QOpenGLWidget):
             glUniform2f(location, texel, texel)
         self._bind_texture_unit(4, self.shadow_depth_tex)
 
-    def _set_material_uniforms(self, texture_ids, has_base_alpha: bool):
+    def _set_material_uniforms(self, texture_ids, has_base_alpha: bool, swizzles=None):
         base_tex = int(texture_ids.get(CHANNEL_BASE, 0) or 0)
         if self.fast_mode:
             metal_tex = 0
@@ -813,6 +839,9 @@ class OpenGLWidget(QOpenGLWidget):
         self._set_int_uniform("uHasMetal", 1 if metal_tex else 0)
         self._set_int_uniform("uHasRough", 1 if rough_tex else 0)
         self._set_int_uniform("uHasNormal", 1 if normal_tex else 0)
+        swizzles = swizzles or {}
+        self._set_int_uniform("uMetalChannel", int(swizzles.get("metal", 0)))
+        self._set_int_uniform("uRoughChannel", int(swizzles.get("roughness", 0)))
         alpha_mode = 0
         use_base_alpha = 0
         if self.alpha_render_mode == "blend":
@@ -1036,7 +1065,40 @@ class OpenGLWidget(QOpenGLWidget):
         texture_ids = {ch: self._get_or_create_texture_id(resolved[ch]) for ch in ALL_CHANNELS}
         base_path = resolved.get(CHANNEL_BASE, "")
         has_alpha = bool(self.texture_alpha_cache.get(base_path, False))
-        return texture_ids, has_alpha
+        swizzles = self._resolve_channel_swizzles(submesh, resolved)
+        return texture_ids, has_alpha, swizzles
+
+    def _is_orm_texture_path(self, path: str) -> bool:
+        if not path:
+            return False
+        stem = os.path.splitext(os.path.basename(str(path).lower()))[0]
+        return ("_orm" in stem) or stem.endswith("orm")
+
+    def _default_channel_swizzle(self, channel: str, path: str) -> int:
+        if self._is_orm_texture_path(path):
+            if channel == CHANNEL_METAL:
+                return 2
+            if channel == CHANNEL_ROUGH:
+                return 1
+        return 0
+
+    def _resolve_channel_swizzles(self, submesh, resolved_paths: dict):
+        explicit = (submesh or {}).get("channel_swizzles") or {}
+        metal_path = str((resolved_paths or {}).get(CHANNEL_METAL) or "")
+        rough_path = str((resolved_paths or {}).get(CHANNEL_ROUGH) or "")
+
+        metal_swizzle = self._default_channel_swizzle(CHANNEL_METAL, metal_path)
+        rough_swizzle = self._default_channel_swizzle(CHANNEL_ROUGH, rough_path)
+
+        if self._is_orm_texture_path(metal_path):
+            metal_swizzle = int(explicit.get("metal", metal_swizzle))
+        if self._is_orm_texture_path(rough_path):
+            rough_swizzle = int(explicit.get("roughness", rough_swizzle))
+
+        return {
+            "metal": int(max(0, min(3, metal_swizzle))),
+            "roughness": int(max(0, min(3, rough_swizzle))),
+        }
 
     def _get_fallback_texture_path(self, channel: str):
         direct = self.last_texture_paths.get(channel) or ""
@@ -1480,6 +1542,39 @@ class OpenGLWidget(QOpenGLWidget):
     def set_alpha_blend_opacity(self, value: float):
         self.alpha_blend_opacity = min(max(float(value), 0.0), 1.0)
         self.update()
+
+    def set_normal_map_space(self, mode: str):
+        mode = str(mode or "auto").strip().lower()
+        if mode not in ("auto", "unity", "unreal"):
+            mode = "auto"
+        self.normal_map_space = mode
+        self.update()
+
+    def _normal_y_flip_enabled(self) -> bool:
+        if self.normal_map_space == "unreal":
+            return True
+        if self.normal_map_space == "unity":
+            return False
+        return self._infer_auto_normal_space() == "unreal"
+
+    def _infer_auto_normal_space(self) -> str:
+        path = ""
+        effective = self.get_effective_texture_paths()
+        if isinstance(effective, dict):
+            path = str(effective.get(CHANNEL_NORMAL) or "").strip()
+        if not path:
+            path = str(self.last_texture_paths.get(CHANNEL_NORMAL) or "").strip()
+        if not path:
+            return "unity"
+
+        name = os.path.splitext(os.path.basename(path).lower())[0]
+        unreal_tokens = ("_dx", "directx", "_unreal", "unreal")
+        unity_tokens = ("_ogl", "opengl", "_unity", "unity")
+        if any(token in name for token in unreal_tokens):
+            return "unreal"
+        if any(token in name for token in unity_tokens):
+            return "unity"
+        return "unity"
 
     def _request_projection_refresh(self):
         # During app startup the GL context may not exist yet.
