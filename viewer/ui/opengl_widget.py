@@ -400,6 +400,7 @@ class OpenGLWidget(QOpenGLWidget):
         self.last_texture_path = ""
         self.last_texture_paths = {ch: "" for ch in ALL_CHANNELS}
         self.channel_overrides = {ch: None for ch in ALL_CHANNELS}
+        self.material_channel_overrides = {}
         self.texture_cache = {}
         self.texture_alpha_cache = {}
         self.base_texture_has_alpha = False
@@ -554,6 +555,7 @@ class OpenGLWidget(QOpenGLWidget):
             self.last_texture_path = ""
             self.last_texture_sets = {}
             self.submeshes = []
+            self.material_channel_overrides = {}
             self.last_debug_info = {}
             self.model_center = np.array([0.0, 0.0, 0.0], dtype=np.float32)
             self.model_translate = np.array([0.0, 0.0, 0.0], dtype=np.float32)
@@ -572,7 +574,9 @@ class OpenGLWidget(QOpenGLWidget):
             self.submeshes = payload.submeshes or []
             self.last_debug_info = payload.debug_info or {}
             self.last_texture_path = ""
+            self.last_texture_paths = {ch: "" for ch in ALL_CHANNELS}
             self.channel_overrides = {ch: None for ch in ALL_CHANNELS}
+            self.material_channel_overrides = {}
             self._compute_model_bounds()
 
             if self.texcoords.size > 0 and not self.submeshes:
@@ -599,6 +603,7 @@ class OpenGLWidget(QOpenGLWidget):
             self.last_texture_path = ""
             self.last_texture_sets = {}
             self.submeshes = []
+            self.material_channel_overrides = {}
             self.last_debug_info = {}
             self.model_center = np.array([0.0, 0.0, 0.0], dtype=np.float32)
             self.model_translate = np.array([0.0, 0.0, 0.0], dtype=np.float32)
@@ -997,8 +1002,14 @@ class OpenGLWidget(QOpenGLWidget):
 
     def _resolve_submesh_textures(self, submesh):
         texture_paths = submesh.get("texture_paths") or {}
+        material_uid = str(submesh.get("material_uid") or "")
+        material_overrides = self.material_channel_overrides.get(material_uid, {}) if material_uid else {}
         resolved = {}
         for ch in ALL_CHANNELS:
+            material_override = material_overrides.get(ch)
+            if material_override is not None:
+                resolved[ch] = material_override
+                continue
             override = self.channel_overrides.get(ch)
             if override is not None:
                 resolved[ch] = override
@@ -1022,6 +1033,62 @@ class OpenGLWidget(QOpenGLWidget):
         if candidates:
             return candidates[0]
         return ""
+
+    def get_effective_texture_paths(self, material_uid: str = ""):
+        out = {ch: "" for ch in ALL_CHANNELS}
+        if material_uid:
+            wanted_uid = str(material_uid)
+            for sub in self.submeshes or []:
+                if str(sub.get("material_uid") or "") != wanted_uid:
+                    continue
+                paths = sub.get("texture_paths") or {}
+                for ch in ALL_CHANNELS:
+                    if not out[ch] and paths.get(ch):
+                        out[ch] = paths.get(ch) or ""
+            mat_overrides = self.material_channel_overrides.get(wanted_uid, {}) or {}
+            for ch in ALL_CHANNELS:
+                value = mat_overrides.get(ch)
+                if value is not None:
+                    out[ch] = value or ""
+        else:
+            for sub in self.submeshes or []:
+                paths = sub.get("texture_paths") or {}
+                for ch in ALL_CHANNELS:
+                    if not out[ch] and paths.get(ch):
+                        out[ch] = paths.get(ch) or ""
+            for ch in ALL_CHANNELS:
+                if not out[ch] and self.last_texture_paths.get(ch):
+                    out[ch] = self.last_texture_paths.get(ch) or ""
+                if not out[ch]:
+                    out[ch] = self._get_fallback_texture_path(ch)
+
+        for ch in ALL_CHANNELS:
+            value = self.channel_overrides.get(ch)
+            if value is not None:
+                out[ch] = value or ""
+        return out
+
+    def get_all_material_effective_textures(self):
+        result = {}
+        for sub in self.submeshes or []:
+            material_uid = str(sub.get("material_uid") or "")
+            if not material_uid:
+                continue
+            if material_uid in result:
+                continue
+            material_name = str(sub.get("material_name") or material_uid)
+            result[material_uid] = {
+                "material_uid": material_uid,
+                "material_name": material_name,
+                "texture_paths": self.get_effective_texture_paths(material_uid=material_uid),
+            }
+        if not result:
+            result["__global__"] = {
+                "material_uid": "__global__",
+                "material_name": "global",
+                "texture_paths": self.get_effective_texture_paths(),
+            }
+        return result
 
     def _get_or_create_texture_id(self, path: str):
         if not path:
@@ -1415,11 +1482,28 @@ class OpenGLWidget(QOpenGLWidget):
         self.shadow_catcher_opacity = min(max(float(value), 0.0), 1.0)
         self.update()
 
-    def apply_texture_path(self, channel: str, path: str) -> bool:
+    def apply_texture_path(self, channel: str, path: str, material_uid: str = "") -> bool:
         if channel not in ALL_CHANNELS:
             return False
         if Image is None:
             return False
+        material_uid = str(material_uid or "").strip()
+
+        if material_uid:
+            overrides = self.material_channel_overrides.setdefault(material_uid, {ch: None for ch in ALL_CHANNELS})
+            if not path:
+                overrides[channel] = ""
+                self.update()
+                return True
+            if not os.path.isfile(path):
+                return False
+            tex_id = self._get_or_create_texture_id(path)
+            if not tex_id:
+                return False
+            overrides[channel] = path
+            self.update()
+            return True
+
         if not path:
             self.channel_overrides[channel] = ""
             self._clear_channel_texture(channel)
@@ -1548,6 +1632,8 @@ class OpenGLWidget(QOpenGLWidget):
         self.texture_cache = {}
         self.texture_alpha_cache = {}
         self.last_texture_paths = {ch: "" for ch in ALL_CHANNELS}
+        self.channel_overrides = {ch: None for ch in ALL_CHANNELS}
+        self.material_channel_overrides = {}
         self.last_texture_path = ""
 
     def _compute_model_bounds(self):

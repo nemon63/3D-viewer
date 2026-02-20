@@ -32,22 +32,49 @@ def load_profiles_config(path: str = "") -> Tuple[dict, str]:
         return _empty_profiles(), str(exc)
 
 
-def evaluate_pipeline_coverage(profile_cfg: dict, texture_paths: dict, texture_sets: dict) -> List[dict]:
+def evaluate_pipeline_coverage(profile_cfg: dict, texture_paths: dict, texture_sets: dict, material_rows=None) -> List[dict]:
     presence = _detect_channel_presence(texture_paths or {}, texture_sets or {})
+    material_presence = _collect_material_presence(material_rows)
     pipelines = (profile_cfg or {}).get("pipelines") or {}
     rows = []
     for code, spec in pipelines.items():
         required = [str(ch).strip().lower() for ch in (spec.get("required_channels") or []) if str(ch).strip()]
-        missing = [ch for ch in required if not _is_channel_present(ch, presence)]
-        ready_count = len(required) - len(missing)
-        if not required:
-            status = "ready"
-        elif ready_count <= 0:
-            status = "missing"
-        elif ready_count < len(required):
-            status = "partial"
+        material_missing = []
+        if material_presence:
+            for material in material_presence:
+                material_row_missing = [ch for ch in required if not _is_channel_present(ch, material["presence"])]
+                if material_row_missing:
+                    material_missing.append(
+                        {
+                            "material_uid": material["material_uid"],
+                            "material_name": material["material_name"],
+                            "missing": material_row_missing,
+                        }
+                    )
+            ready_materials = max(0, len(material_presence) - len(material_missing))
+            missing = sorted({ch for item in material_missing for ch in (item.get("missing") or [])})
+            if not required:
+                status = "ready"
+            elif ready_materials <= 0:
+                status = "missing"
+            elif ready_materials < len(material_presence):
+                status = "partial"
+            else:
+                status = "ready"
+            ready_count = ready_materials
+            required_total = len(material_presence)
         else:
-            status = "ready"
+            missing = [ch for ch in required if not _is_channel_present(ch, presence)]
+            ready_count = len(required) - len(missing)
+            if not required:
+                status = "ready"
+            elif ready_count <= 0:
+                status = "missing"
+            elif ready_count < len(required):
+                status = "partial"
+            else:
+                status = "ready"
+            required_total = len(required)
         rows.append(
             {
                 "pipeline": code,
@@ -56,6 +83,10 @@ def evaluate_pipeline_coverage(profile_cfg: dict, texture_paths: dict, texture_s
                 "required": required,
                 "missing": missing,
                 "ready_required": ready_count,
+                "required_total": required_total,
+                "material_total": len(material_presence),
+                "material_ready": ready_count if material_presence else 0,
+                "material_missing": material_missing,
             }
         )
     rows.sort(key=lambda x: x["pipeline"])
@@ -70,6 +101,7 @@ def run_validation_checks(
     texture_sets: dict,
     triangles: int,
     coverage_rows: List[dict],
+    material_rows=None,
 ) -> List[dict]:
     profile_cfg = profile_cfg or {}
     checks = profile_cfg.get("validation") or {}
@@ -117,22 +149,39 @@ def run_validation_checks(
 
     for row in coverage_rows or []:
         missing = row.get("missing") or []
+        material_missing = row.get("material_missing") or []
         if missing:
+            if material_missing:
+                top = []
+                for item in material_missing[:4]:
+                    mat_name = str(item.get("material_name") or item.get("material_uid") or "material")
+                    top.append(f"{mat_name}({', '.join(item.get('missing') or [])})")
+                detail = "; ".join(top)
+                if len(material_missing) > 4:
+                    detail += f"; ... +{len(material_missing) - 4}"
+                message = "Missing required channels by material: " + detail
+            else:
+                message = "Missing required channels: " + ", ".join(missing)
             results.append(
                 {
                     "severity": "error",
                     "pipeline": row.get("pipeline") or "global",
                     "rule_code": "pipeline.required_channels",
-                    "message": "Missing required channels: " + ", ".join(missing),
+                    "message": message,
                 }
             )
         else:
+            material_total = int(row.get("material_total") or 0)
+            if material_total > 0:
+                message = f"All required channels are present for {material_total}/{material_total} materials"
+            else:
+                message = "All required channels are present"
             results.append(
                 {
                     "severity": "info",
                     "pipeline": row.get("pipeline") or "global",
                     "rule_code": "pipeline.required_channels",
-                    "message": "All required channels are present",
+                    "message": message,
                 }
             )
 
@@ -265,6 +314,37 @@ def _iter_texture_paths(texture_paths: dict, texture_sets: dict):
         for p in paths or []:
             if p:
                 yield str(p)
+
+
+def _collect_material_presence(material_rows) -> List[dict]:
+    out = []
+    rows = material_rows or {}
+    if isinstance(rows, dict):
+        items = rows.items()
+    elif isinstance(rows, list):
+        items = enumerate(rows)
+    else:
+        items = []
+
+    for key, value in items:
+        if isinstance(value, dict) and "texture_paths" in value:
+            texture_paths = value.get("texture_paths") or {}
+            material_uid = str(value.get("material_uid") or key or "")
+            material_name = str(value.get("material_name") or material_uid or "material")
+        elif isinstance(value, dict):
+            texture_paths = value
+            material_uid = str(key or "")
+            material_name = material_uid or "material"
+        else:
+            continue
+        out.append(
+            {
+                "material_uid": material_uid,
+                "material_name": material_name,
+                "presence": _detect_channel_presence(texture_paths, {}),
+            }
+        )
+    return out
 
 
 def _detect_channel_presence(texture_paths: dict, texture_sets: dict) -> Dict[str, bool]:

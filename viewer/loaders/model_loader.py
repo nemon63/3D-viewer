@@ -26,7 +26,7 @@ except ImportError:
     fbx = None
 
 
-_PAYLOAD_CACHE_VERSION = "v3"
+_PAYLOAD_CACHE_VERSION = "v4"
 _PAYLOAD_CACHE_DIR = os.path.join(".cache", "payload_cache")
 _SMOOTH_FALLBACK_MAX_POLYGONS = 250000
 
@@ -132,6 +132,7 @@ def _load_trimesh_payload(file_path: str, fast_mode: bool = False) -> MeshPayloa
                     "indices": np.array(indices, dtype=np.uint32),
                     "object_name": "scene",
                     "material_name": "default",
+                    "material_uid": "default:scene",
                     "texture_paths": _select_texture_paths(texture_sets, hint_names=[model_hint, "scene"]),
                 }
             ],
@@ -164,6 +165,7 @@ def _load_trimesh_payload(file_path: str, fast_mode: bool = False) -> MeshPayloa
                 "indices": np.array(indices, dtype=np.uint32),
                 "object_name": "mesh",
                 "material_name": "default",
+                "material_uid": "default:mesh",
                 "texture_paths": _select_texture_paths(texture_sets, hint_names=[model_hint, "mesh"]),
             }
         ],
@@ -255,6 +257,20 @@ def _merge_texture_paths(primary_paths: dict, fallback_sets: dict, hint_names=No
         candidates = fallback_sets.get(fallback_channel) or []
         merged[out_channel] = _pick_best_texture_path(candidates, hint_names=hint_names)
     return merged
+
+
+def _filter_texture_sets_by_hint(texture_sets: dict, hint_names=None):
+    hint_tokens = _extract_hint_tokens(hint_names)
+    if not hint_tokens:
+        return {str(k): list(v or []) for k, v in (texture_sets or {}).items()}
+    filtered = {}
+    for channel, paths in (texture_sets or {}).items():
+        kept = []
+        for path in paths or []:
+            if _texture_match_score(path, hint_tokens) > 0:
+                kept.append(path)
+        filtered[str(channel)] = kept
+    return filtered
 
 
 _GENERIC_HINT_TOKENS = {
@@ -397,6 +413,7 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
                     "indices": sub_indices,
                     "object_name": group["object_name"],
                     "material_name": group["material_name"],
+                    "material_uid": group["material_uid"],
                     "texture_paths": material_paths,
                 }
             )
@@ -417,9 +434,14 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
         if submeshes:
             model_hint = os.path.splitext(os.path.basename(file_path))[0]
             for submesh in submeshes:
-                submesh["texture_paths"] = _merge_texture_paths(
-                    submesh.get("texture_paths") or {},
+                base_paths = submesh.get("texture_paths") or {}
+                filtered_fallback = _filter_texture_sets_by_hint(
                     texture_sets,
+                    hint_names=[submesh.get("material_name"), submesh.get("object_name"), model_hint],
+                )
+                submesh["texture_paths"] = _merge_texture_paths(
+                    base_paths,
+                    filtered_fallback,
                     hint_names=[submesh.get("material_name"), submesh.get("object_name"), model_hint],
                 )
         else:
@@ -429,6 +451,7 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
                     "indices": np.array(indices, dtype=np.uint32),
                     "object_name": "fbx",
                     "material_name": "default",
+                    "material_uid": "default:fbx",
                     "texture_paths": _select_texture_paths(texture_sets, hint_names=[model_hint]),
                 }
             ]
