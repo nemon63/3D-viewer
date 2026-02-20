@@ -1,6 +1,6 @@
 import json
 import os
-from PyQt5.QtCore import QSettings, QSize, Qt, QThread, QTimer
+from PyQt5.QtCore import QSettings, QSize, Qt, QTimer
 from PyQt5.QtGui import QColor, QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -33,9 +33,10 @@ from viewer.ui.opengl_widget import OpenGLWidget
 from viewer.ui.catalog_dock import CatalogDockPanel
 from viewer.ui.theme import apply_ui_theme
 from viewer.controllers.batch_preview_controller import BatchPreviewController
+from viewer.controllers.catalog_index_controller import CatalogIndexController
 from viewer.controllers.catalog_controller import CatalogController
+from viewer.controllers.directory_scan_controller import DirectoryScanController
 from viewer.controllers.model_session_controller import ModelSessionController
-from viewer.ui.workers import CatalogIndexWorker, DirectoryScanWorker
 from viewer.services.catalog_db import (
     get_asset_texture_overrides,
     get_preview_paths_for_assets,
@@ -88,12 +89,6 @@ class MainWindow(QMainWindow):
         self._syncing_material_ui = False
         self._restoring_texture_overrides = False
         self.render_mode = "quality"
-        self._dir_scan_thread = None
-        self._dir_scan_worker = None
-        self._dir_scan_request_id = 0
-        self._dir_scan_auto_select_first = True
-        self._index_thread = None
-        self._index_worker = None
         self._last_index_summary = None
         self._catalog_scan_text = "Индекс: нет данных"
         self.catalog_dialog = None
@@ -112,6 +107,12 @@ class MainWindow(QMainWindow):
         self._syncing_filters_from_dock = False
         self.main_toolbar = None
         self.catalog_controller = CatalogController()
+        self.directory_scan_controller = DirectoryScanController(self)
+        self.directory_scan_controller.scanFinished.connect(self._on_directory_scan_finished)
+        self.directory_scan_controller.scanFailed.connect(self._on_directory_scan_failed)
+        self.catalog_index_controller = CatalogIndexController(self)
+        self.catalog_index_controller.scanFinished.connect(self._on_index_scan_finished)
+        self.catalog_index_controller.scanFailed.connect(self._on_index_scan_failed)
         self.model_session_controller = ModelSessionController(self)
         self.model_session_controller.loadingStarted.connect(self._on_model_loading_started)
         self.model_session_controller.loaded.connect(self._on_model_loaded)
@@ -859,7 +860,6 @@ class MainWindow(QMainWindow):
         self._model_item_by_path = {}
         self.current_file_path = ""
         self._selected_model_path = ""
-        self._dir_scan_auto_select_first = bool(auto_select_first)
         self.model_list.clear()
         self._refresh_catalog_dock_items(preview_map_raw={})
         self._sync_filters_to_dock()
@@ -869,26 +869,14 @@ class MainWindow(QMainWindow):
         self.batch_controller.restore_state(self.current_directory, self._thumb_size)
 
     def _start_directory_scan(self, directory: str, auto_select_first: bool):
-        self._dir_scan_request_id += 1
-        request_id = self._dir_scan_request_id
-        self._dir_scan_auto_select_first = bool(auto_select_first)
+        self.directory_scan_controller.start(
+            directory=directory,
+            model_extensions=self.model_extensions,
+            auto_select_first=bool(auto_select_first),
+        )
 
-        thread = QThread(self)
-        worker = DirectoryScanWorker(request_id, directory, self.model_extensions)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.finished.connect(self._on_directory_scan_finished)
-        worker.failed.connect(self._on_directory_scan_failed)
-        worker.finished.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        self._dir_scan_thread = thread
-        self._dir_scan_worker = worker
-        thread.start()
-
-    def _on_directory_scan_finished(self, request_id: int, directory: str, files):
-        if request_id != self._dir_scan_request_id:
+    def _on_directory_scan_finished(self, request_id: int, directory: str, files, auto_select_first: bool):
+        if request_id != self.directory_scan_controller.request_id:
             return
         if directory != self.current_directory:
             return
@@ -910,7 +898,7 @@ class MainWindow(QMainWindow):
             self._set_status_text("No supported models in selected folder.")
             return
 
-        if self._dir_scan_auto_select_first:
+        if auto_select_first:
             self._select_model_by_index(0)
         else:
             self.model_list.clearSelection()
@@ -922,7 +910,7 @@ class MainWindow(QMainWindow):
         self._set_status_text(f"Found models: {len(self.filtered_model_files)}")
 
     def _on_directory_scan_failed(self, request_id: int, error_text: str):
-        if request_id != self._dir_scan_request_id:
+        if request_id != self.directory_scan_controller.request_id:
             return
         self.model_files = []
         self.filtered_model_files = []
@@ -1896,24 +1884,12 @@ class MainWindow(QMainWindow):
         self._last_index_summary = None
         self._catalog_scan_text = "Индекс: сканирование..."
         self._sync_catalog_dialog_state()
-        thread = QThread(self)
-        worker = CatalogIndexWorker(
-            directory,
-            self.model_extensions,
-            self.catalog_db_path,
+        self.catalog_index_controller.start(
+            directory=directory,
+            model_extensions=self.model_extensions,
+            db_path=self.catalog_db_path,
             scanned_paths=scanned_paths,
         )
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.finished.connect(self._on_index_scan_finished)
-        worker.failed.connect(self._on_index_scan_failed)
-        worker.finished.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        self._index_thread = thread
-        self._index_worker = worker
-        thread.start()
 
     def _on_index_scan_finished(self, summary: dict):
         self._last_index_summary = summary
