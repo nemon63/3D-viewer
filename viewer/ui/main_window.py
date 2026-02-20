@@ -258,6 +258,12 @@ class MainWindow(QMainWindow):
         self.alpha_cutoff_slider.setValue(50)
         self.alpha_cutoff_slider.valueChanged.connect(self._on_alpha_cutoff_changed)
         material_layout.addRow("Alpha Cutoff", self.alpha_cutoff_slider)
+        self.alpha_blend_label = QLabel("1.00", self)
+        self.alpha_blend_slider = QSlider(Qt.Horizontal, self)
+        self.alpha_blend_slider.setRange(0, 100)
+        self.alpha_blend_slider.setValue(100)
+        self.alpha_blend_slider.valueChanged.connect(self._on_alpha_blend_changed)
+        material_layout.addRow("Blend Amount", self.alpha_blend_slider)
         self.alpha_mode_combo = QComboBox(self)
         self.alpha_mode_combo.addItem("Cutout", "cutout")
         self.alpha_mode_combo.addItem("Alpha Blend", "blend")
@@ -266,7 +272,8 @@ class MainWindow(QMainWindow):
         self.blend_base_alpha_checkbox = QCheckBox("Use BaseColor alpha in Blend", self)
         self.blend_base_alpha_checkbox.stateChanged.connect(self._on_blend_base_alpha_changed)
         material_layout.addRow(self.blend_base_alpha_checkbox)
-        material_layout.addRow("Значение", self.alpha_cutoff_label)
+        material_layout.addRow("Cutoff", self.alpha_cutoff_label)
+        material_layout.addRow("Blend", self.alpha_blend_label)
         controls_tabs.addTab(material_group, "Материалы")
 
         camera_group = QGroupBox("Камера", self)
@@ -443,6 +450,7 @@ class MainWindow(QMainWindow):
         self._init_settings_dock()
 
         self._on_alpha_cutoff_changed(self.alpha_cutoff_slider.value())
+        self._on_alpha_blend_changed(self.alpha_blend_slider.value())
         self._on_alpha_mode_changed(self.alpha_mode_combo.currentIndex())
         self._on_blend_base_alpha_changed(self.blend_base_alpha_checkbox.checkState())
         self._on_rotate_speed_changed(self.rotate_speed_slider.value())
@@ -752,6 +760,7 @@ class MainWindow(QMainWindow):
         shadow_bias = self.settings.value("view/shadow_bias_slider", 12, type=int)
         shadow_softness = self.settings.value("view/shadow_softness_slider", 100, type=int)
         alpha_cutoff = self.settings.value("view/alpha_cutoff_slider", 50, type=int)
+        alpha_blend = self.settings.value("view/alpha_blend_slider", 100, type=int)
         alpha_mode = self.settings.value("view/alpha_mode", "cutout", type=str)
         blend_base_alpha = self.settings.value("view/blend_base_alpha", False, type=bool)
         ui_theme = self.settings.value("view/ui_theme", "graphite", type=str)
@@ -778,6 +787,7 @@ class MainWindow(QMainWindow):
         self.shadow_bias_slider.setValue(max(self.shadow_bias_slider.minimum(), min(self.shadow_bias_slider.maximum(), shadow_bias)))
         self.shadow_softness_slider.setValue(max(self.shadow_softness_slider.minimum(), min(self.shadow_softness_slider.maximum(), shadow_softness)))
         self.alpha_cutoff_slider.setValue(max(self.alpha_cutoff_slider.minimum(), min(self.alpha_cutoff_slider.maximum(), alpha_cutoff)))
+        self.alpha_blend_slider.setValue(max(self.alpha_blend_slider.minimum(), min(self.alpha_blend_slider.maximum(), alpha_blend)))
 
         alpha_mode_idx = self.alpha_mode_combo.findData(alpha_mode)
         if alpha_mode_idx >= 0:
@@ -1405,7 +1415,7 @@ class MainWindow(QMainWindow):
             f"Metal: {_name(tex_paths.get('metal', ''))}",
             f"Rough: {_name(tex_paths.get('roughness', ''))}",
             f"Normal: {_name(tex_paths.get('normal', ''))}",
-            f"Alpha: {self.gl_widget.alpha_render_mode}  Base alpha: {'on' if self.gl_widget.use_base_alpha_in_blend else 'off'}",
+            f"Alpha: {self.gl_widget.alpha_render_mode}  Base alpha: {'on' if self.gl_widget.use_base_alpha_in_blend else 'off'}  Blend: {self.gl_widget.alpha_blend_opacity:.2f}",
             f"Projection: {self.gl_widget.projection_mode}  Shadows: {self.gl_widget.shadow_status_message}",
         ]
         self.gl_widget.set_overlay_lines(lines)
@@ -1437,6 +1447,13 @@ class MainWindow(QMainWindow):
         if self._settings_ready:
             self.settings.setValue("view/alpha_cutoff_slider", int(value))
 
+    def _on_alpha_blend_changed(self, value: int):
+        opacity = value / 100.0
+        self.alpha_blend_label.setText(f"{opacity:.2f}")
+        self.gl_widget.set_alpha_blend_opacity(opacity)
+        if self._settings_ready:
+            self.settings.setValue("view/alpha_blend_slider", int(value))
+
     def _on_alpha_mode_changed(self, _value: int):
         mode = self.alpha_mode_combo.currentData() or "cutout"
         self.gl_widget.set_alpha_render_mode(mode)
@@ -1444,6 +1461,8 @@ class MainWindow(QMainWindow):
         is_blend = mode == "blend"
         self.alpha_cutoff_slider.setEnabled(is_cutout)
         self.alpha_cutoff_label.setEnabled(is_cutout)
+        self.alpha_blend_slider.setEnabled(is_blend)
+        self.alpha_blend_label.setEnabled(is_blend)
         self.blend_base_alpha_checkbox.setEnabled(is_blend)
         self.gl_widget.set_use_base_alpha_in_blend(is_blend and self.blend_base_alpha_checkbox.isChecked())
         if self._settings_ready:

@@ -160,6 +160,7 @@ uniform int uUnlitTexturePreview;
 uniform int uAlphaMode;
 uniform int uUseBaseAlpha;
 uniform float uAlphaCutoff;
+uniform float uBlendOpacity;
 uniform float uAmbientStrength;
 uniform int uFastMode;
 uniform int uShadowEnabled;
@@ -254,7 +255,12 @@ void main() {
         // Cutout should stay visually opaque after clipping.
         alpha = 1.0;
     } else if (uAlphaMode == 2) {
-        alpha = (uUseBaseAlpha == 1) ? baseSample.a : 1.0;
+        float blendValue = clamp(uBlendOpacity, 0.0, 1.0);
+        if (uUseBaseAlpha == 1) {
+            alpha = mix(1.0, baseSample.a, blendValue);
+        } else {
+            alpha = blendValue;
+        }
     }
     float metallic = (uHasMetal == 1) ? texture2D(uMetalTex, vUv).r : 0.0;
     float roughness = (uHasRough == 1) ? texture2D(uRoughTex, vUv).r : 0.55;
@@ -445,6 +451,7 @@ class OpenGLWidget(QOpenGLWidget):
         self.directional_light_energy = 0.12
         self.alpha_render_mode = "cutout"
         self.use_base_alpha_in_blend = False
+        self.alpha_blend_opacity = 1.0
         self._view_matrix = np.identity(4, dtype=np.float32)
         self.overlay_visible = False
         self.overlay_lines = []
@@ -753,6 +760,7 @@ class OpenGLWidget(QOpenGLWidget):
         self._set_int_uniform("uUnlitTexturePreview", 1 if self.unlit_texture_preview else 0)
         self._set_int_uniform("uFastMode", 1 if self.fast_mode else 0)
         self._set_float_uniform("uAlphaCutoff", self.alpha_cutoff)
+        self._set_float_uniform("uBlendOpacity", self.alpha_blend_opacity)
         self._set_float_uniform("uAmbientStrength", self.ambient_strength)
 
         target = np.array([0.0, self.model_target_y, 0.0], dtype=np.float32)
@@ -1441,6 +1449,10 @@ class OpenGLWidget(QOpenGLWidget):
 
     def set_use_base_alpha_in_blend(self, enabled: bool):
         self.use_base_alpha_in_blend = bool(enabled)
+        self.update()
+
+    def set_alpha_blend_opacity(self, value: float):
+        self.alpha_blend_opacity = min(max(float(value), 0.0), 1.0)
         self.update()
 
     def _request_projection_refresh(self):
