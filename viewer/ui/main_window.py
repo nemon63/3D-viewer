@@ -59,6 +59,7 @@ from viewer.services.texture_sets import (
 
 class MainWindow(QMainWindow):
     HEAVY_FILE_SIZE_MB = 200
+    WORKSPACE_STATE_VERSION = 1
 
     def __init__(self):
         super().__init__()
@@ -468,6 +469,7 @@ class MainWindow(QMainWindow):
         self._init_main_toolbar()
         self._init_catalog_dock()
         self._init_settings_dock()
+        self._restore_workspace_state()
 
         self._on_alpha_cutoff_changed(self.alpha_cutoff_slider.value())
         self._on_alpha_blend_changed(self.alpha_blend_slider.value())
@@ -494,6 +496,7 @@ class MainWindow(QMainWindow):
 
     def _init_main_toolbar(self):
         toolbar = QToolBar("Main", self)
+        toolbar.setObjectName("main_toolbar")
         toolbar.setMovable(False)
         toolbar.setFloatable(False)
         toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
@@ -533,6 +536,7 @@ class MainWindow(QMainWindow):
 
     def _init_catalog_dock(self):
         dock = QDockWidget("Каталог (превью)", self)
+        dock.setObjectName("catalog_dock")
         dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         dock.setFeatures(
             QDockWidget.DockWidgetMovable
@@ -564,6 +568,7 @@ class MainWindow(QMainWindow):
 
     def _init_settings_dock(self):
         dock = QDockWidget("Настройки (материал/камера/свет/валидация)", self)
+        dock.setObjectName("settings_dock")
         dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         dock.setFeatures(
             QDockWidget.DockWidgetMovable
@@ -869,6 +874,7 @@ class MainWindow(QMainWindow):
         )
 
     def _restore_view_settings(self):
+        thumb_size = self.settings.value("view/thumb_size", self._thumb_size, type=int)
         rotate_speed = self.settings.value("view/rotate_speed_slider", 100, type=int)
         zoom_speed = self.settings.value("view/zoom_speed_slider", 110, type=int)
         ambient = self.settings.value("view/ambient_slider", 8, type=int)
@@ -941,6 +947,42 @@ class MainWindow(QMainWindow):
         self.search_input.setText(search_text)
         self.only_favorites_checkbox.setChecked(bool(only_fav))
         self._pending_category_filter = category_name or "Все"
+        self._on_catalog_thumb_size_changed(
+            max(72, min(320, int(thumb_size if thumb_size is not None else self._thumb_size)))
+        )
+
+    def _restore_workspace_state(self):
+        try:
+            geom = self.settings.value("workspace/geometry")
+            if geom:
+                self.restoreGeometry(geom)
+            state = self.settings.value("workspace/state")
+            if state:
+                self.restoreState(state, self.WORKSPACE_STATE_VERSION)
+            tab_idx = self.settings.value("workspace/controls_tab_index", 0, type=int)
+            if self.controls_tabs is not None and 0 <= tab_idx < self.controls_tabs.count():
+                self.controls_tabs.setCurrentIndex(tab_idx)
+            catalog_visible = self.settings.value("workspace/catalog_visible", True, type=bool)
+            settings_visible = self.settings.value("workspace/settings_visible", True, type=bool)
+            if self.catalog_dock is not None:
+                self.catalog_dock.setVisible(bool(catalog_visible))
+            if self.settings_dock is not None:
+                self.settings_dock.setVisible(bool(settings_visible))
+        except Exception:
+            pass
+
+    def _save_workspace_state(self):
+        try:
+            self.settings.setValue("workspace/geometry", self.saveGeometry())
+            self.settings.setValue("workspace/state", self.saveState(self.WORKSPACE_STATE_VERSION))
+            if self.controls_tabs is not None:
+                self.settings.setValue("workspace/controls_tab_index", int(self.controls_tabs.currentIndex()))
+            if self.catalog_dock is not None:
+                self.settings.setValue("workspace/catalog_visible", bool(self.catalog_dock.isVisible()))
+            if self.settings_dock is not None:
+                self.settings.setValue("workspace/settings_visible", bool(self.settings_dock.isVisible()))
+        except Exception:
+            pass
 
     def _restore_last_directory(self):
         last_directory = self.settings.value("last_directory", "", type=str)
@@ -2189,10 +2231,16 @@ class MainWindow(QMainWindow):
 
     def _on_catalog_thumb_size_changed(self, size: int):
         self._thumb_size = int(size)
+        if self._settings_ready:
+            self.settings.setValue("view/thumb_size", int(self._thumb_size))
         self.model_list.setIconSize(QSize(self._thumb_size, self._thumb_size))
         for item in self._model_item_by_path.values():
             item.setSizeHint(0, QSize(0, self._thumb_size + 10))
         self._refresh_catalog_dock_items()
+
+    def closeEvent(self, event):
+        self._save_workspace_state()
+        super().closeEvent(event)
 
     def _show_catalog_dock(self):
         if self.catalog_dock is None:
