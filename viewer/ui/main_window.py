@@ -34,7 +34,8 @@ from viewer.ui.catalog_dock import CatalogDockPanel
 from viewer.ui.theme import apply_ui_theme
 from viewer.controllers.batch_preview_controller import BatchPreviewController
 from viewer.controllers.catalog_controller import CatalogController
-from viewer.ui.workers import CatalogIndexWorker, DirectoryScanWorker, ModelLoadWorker
+from viewer.controllers.model_session_controller import ModelSessionController
+from viewer.ui.workers import CatalogIndexWorker, DirectoryScanWorker
 from viewer.services.catalog_db import (
     get_asset_texture_overrides,
     get_preview_paths_for_assets,
@@ -87,11 +88,6 @@ class MainWindow(QMainWindow):
         self._syncing_material_ui = False
         self._restoring_texture_overrides = False
         self.render_mode = "quality"
-        self._load_thread = None
-        self._load_worker = None
-        self._load_request_id = 0
-        self._active_load_row = -1
-        self._active_load_file_path = ""
         self._dir_scan_thread = None
         self._dir_scan_worker = None
         self._dir_scan_request_id = 0
@@ -116,6 +112,10 @@ class MainWindow(QMainWindow):
         self._syncing_filters_from_dock = False
         self.main_toolbar = None
         self.catalog_controller = CatalogController()
+        self.model_session_controller = ModelSessionController(self)
+        self.model_session_controller.loadingStarted.connect(self._on_model_loading_started)
+        self.model_session_controller.loaded.connect(self._on_model_loaded)
+        self.model_session_controller.failed.connect(self._on_model_load_failed)
         self.batch_controller = BatchPreviewController(self.settings, self)
         self.batch_controller.requestLoad.connect(self._open_model_by_path)
         self.batch_controller.statusMessage.connect(self._set_status_text)
@@ -1308,9 +1308,32 @@ class MainWindow(QMainWindow):
                 _push(channel, path)
         return out
 
+    def _global_material_channel_states(self):
+        states = {channel: {"state": "none", "path": ""} for channel, _ in self.material_channels}
+        rows = self.gl_widget.get_all_material_effective_textures() or {}
+        if not rows:
+            return states
+
+        for channel, _ in self.material_channels:
+            values = []
+            for row in rows.values():
+                tex_paths = row.get("texture_paths") or {}
+                values.append(str(tex_paths.get(channel) or ""))
+            uniq = set(values)
+            if len(uniq) == 1:
+                only = next(iter(uniq))
+                if only:
+                    states[channel] = {"state": "single", "path": only}
+                else:
+                    states[channel] = {"state": "none", "path": ""}
+            else:
+                states[channel] = {"state": "mixed", "path": ""}
+        return states
+
     def _refresh_material_channel_controls(self):
         material_uid = self._selected_material_uid()
         effective_paths, texture_sets = self._collect_effective_texture_channels(material_uid=material_uid)
+        global_states = self._global_material_channel_states() if not material_uid else {}
         self._texture_set_profiles = build_texture_set_profiles(texture_sets or {})
         self._sync_texture_set_selection_from_current_channels(current_paths=effective_paths)
 
@@ -1319,9 +1342,22 @@ class MainWindow(QMainWindow):
             combo.blockSignals(True)
             combo.clear()
             combo.addItem("None", "")
+            if not material_uid and global_states.get(channel, {}).get("state") == "mixed":
+                combo.addItem("Mixed", "__mixed__")
             for path in texture_sets.get(channel, []):
                 combo.addItem(os.path.basename(path), path)
-            selected = effective_paths.get(channel, "")
+            if not material_uid:
+                state = global_states.get(channel, {}).get("state")
+                if state == "mixed":
+                    selected = "__mixed__"
+                elif state == "single":
+                    selected = global_states.get(channel, {}).get("path") or ""
+                else:
+                    selected = ""
+            else:
+                selected = effective_paths.get(channel, "")
+            if selected and selected != "__mixed__" and combo.findData(selected) < 0:
+                combo.addItem(os.path.basename(selected), selected)
             matched = combo.findData(selected)
             if matched >= 0:
                 combo.setCurrentIndex(matched)
@@ -1371,7 +1407,8 @@ class MainWindow(QMainWindow):
             current_paths = {}
             for channel, _title in self.material_channels:
                 combo = self.material_boxes.get(channel)
-                current_paths[channel] = combo.currentData() if combo is not None else ""
+                value = combo.currentData() if combo is not None else ""
+                current_paths[channel] = "" if value == "__mixed__" else value
 
         matched_key = match_profile_key(self._texture_set_profiles, current_paths or {})
 
@@ -1439,7 +1476,7 @@ class MainWindow(QMainWindow):
     def _persist_texture_overrides_for_current(self):
         if self._restoring_texture_overrides:
             return
-        source_path = self.current_file_path or self._active_load_file_path or self._current_selected_path() or ""
+        source_path = self.current_file_path or self.model_session_controller.active_path or self._current_selected_path() or ""
         if not source_path:
             return
         payload = self._texture_override_payload_from_state()
@@ -1503,6 +1540,8 @@ class MainWindow(QMainWindow):
         if combo is None:
             return
         path = combo.currentData()
+        if path == "__mixed__":
+            return
         if self.gl_widget.apply_texture_path(channel, path or "", material_uid=self._selected_material_uid()):
             self._persist_texture_overrides_for_current()
         self._update_status(self._current_model_index())
@@ -1794,39 +1833,21 @@ class MainWindow(QMainWindow):
         self._update_status(self._current_model_index())
 
     def _start_async_model_load(self, row: int, file_path: str):
-        self._load_request_id += 1
-        request_id = self._load_request_id
-        self._active_load_row = row
-        self._active_load_file_path = file_path
+        self.model_session_controller.start_load(
+            row=row,
+            file_path=file_path,
+            fast_mode=(self.render_mode == "fast"),
+        )
 
-        # Keep previous worker alive; ignore outdated results by request_id.
+    def _on_model_loading_started(self, file_path: str):
         self.model_list.setEnabled(False)
         self.prev_button.setEnabled(False)
         self.next_button.setEnabled(False)
         self._set_status_text(f"Загрузка: {os.path.basename(file_path)} ...")
 
-        thread = QThread(self)
-        worker = ModelLoadWorker(request_id, file_path, fast_mode=(self.render_mode == "fast"))
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.loaded.connect(self._on_model_loaded)
-        worker.failed.connect(self._on_model_load_failed)
-        worker.loaded.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-
-        self._load_thread = thread
-        self._load_worker = worker
-        thread.start()
-
-    def _on_model_loaded(self, request_id: int, payload):
-        if request_id != self._load_request_id:
+    def _on_model_loaded(self, request_id: int, row: int, file_path: str, payload):
+        if request_id != self.model_session_controller.request_id:
             return
-        row = self._active_load_row
-        file_path = self._active_load_file_path or (
-            self.filtered_model_files[row] if 0 <= row < len(self.filtered_model_files) else ""
-        )
         loaded = self.gl_widget.apply_payload(payload)
         self.model_list.setEnabled(True)
         self.prev_button.setEnabled(True)
@@ -1858,8 +1879,8 @@ class MainWindow(QMainWindow):
             print("[FBX DEBUG]", self.gl_widget.last_debug_info or {})
             print("[FBX DEBUG] selected_texture:", self.gl_widget.last_texture_path or "<none>")
 
-    def _on_model_load_failed(self, request_id: int, error_text: str):
-        if request_id != self._load_request_id:
+    def _on_model_load_failed(self, request_id: int, row: int, file_path: str, error_text: str):
+        if request_id != self.model_session_controller.request_id:
             return
         self.model_list.setEnabled(True)
         self.prev_button.setEnabled(True)

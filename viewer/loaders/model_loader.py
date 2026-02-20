@@ -267,8 +267,12 @@ def _select_texture_paths(texture_sets: dict, hint_names=None):
     }
 
 
-def _merge_texture_paths(primary_paths: dict, fallback_sets: dict, hint_names=None):
+def _merge_texture_paths(primary_paths: dict, fallback_sets: dict, hint_names=None, fill_missing_channels=None):
     merged = dict(primary_paths or {})
+    if fill_missing_channels is None:
+        fill_missing_channels = {"basecolor", "metal", "roughness", "normal"}
+    else:
+        fill_missing_channels = {str(ch) for ch in (fill_missing_channels or [])}
     channel_map = (
         ("basecolor", CHANNEL_BASECOLOR),
         ("metal", CHANNEL_METAL),
@@ -276,17 +280,21 @@ def _merge_texture_paths(primary_paths: dict, fallback_sets: dict, hint_names=No
         ("normal", CHANNEL_NORMAL),
     )
     for out_channel, fallback_channel in channel_map:
+        if out_channel not in fill_missing_channels:
+            continue
         if merged.get(out_channel):
             continue
         candidates = fallback_sets.get(fallback_channel) or []
         merged[out_channel] = _pick_best_texture_path(candidates, hint_names=hint_names)
 
-    orm_path = merged.get("orm") or _pick_best_texture_path(fallback_sets.get(CHANNEL_ORM) or [], hint_names=hint_names)
+    orm_path = merged.get("orm")
+    if not orm_path and (("metal" in fill_missing_channels) or ("roughness" in fill_missing_channels)):
+        orm_path = _pick_best_texture_path(fallback_sets.get(CHANNEL_ORM) or [], hint_names=hint_names)
     merged["orm"] = orm_path
     if orm_path:
-        if not merged.get("metal"):
+        if ("metal" in fill_missing_channels) and (not merged.get("metal")):
             merged["metal"] = orm_path
-        if not merged.get("roughness"):
+        if ("roughness" in fill_missing_channels) and (not merged.get("roughness")):
             merged["roughness"] = orm_path
     swizzles = dict((merged.get("channel_swizzles") or {}))
     if not swizzles:
@@ -484,6 +492,7 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
                     base_paths,
                     filtered_fallback,
                     hint_names=[submesh.get("material_name"), submesh.get("object_name"), model_hint],
+                    fill_missing_channels={"basecolor"},
                 )
         else:
             model_hint = os.path.splitext(os.path.basename(file_path))[0]
