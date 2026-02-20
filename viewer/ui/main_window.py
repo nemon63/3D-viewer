@@ -34,11 +34,13 @@ from viewer.ui.catalog_dock import CatalogDockPanel
 from viewer.ui.theme import apply_ui_theme
 from viewer.ui.workers import CatalogIndexWorker, DirectoryScanWorker, ModelLoadWorker
 from viewer.services.catalog_db import (
+    get_asset_texture_overrides,
     get_favorite_paths,
     get_preview_paths_for_assets,
     get_recent_events,
     init_catalog_db,
     set_asset_favorite,
+    set_asset_texture_overrides,
 )
 from viewer.services.pipeline_validation import (
     evaluate_pipeline_coverage,
@@ -82,6 +84,7 @@ class MainWindow(QMainWindow):
         self._texture_set_profiles = []
         self._syncing_texture_set_ui = False
         self._syncing_material_ui = False
+        self._restoring_texture_overrides = False
         self.render_mode = "quality"
         self._load_thread = None
         self._load_worker = None
@@ -1367,6 +1370,7 @@ class MainWindow(QMainWindow):
 
         paths = profile.get("paths") or {}
         material_uid = self._selected_material_uid()
+        any_applied = False
         self._syncing_texture_set_ui = True
         try:
             for channel, _title in self.material_channels:
@@ -1377,10 +1381,13 @@ class MainWindow(QMainWindow):
                     idx = combo.findData(path) if path else 0
                     combo.setCurrentIndex(idx if idx >= 0 else 0)
                     combo.blockSignals(False)
-                self.gl_widget.apply_texture_path(channel, path, material_uid=material_uid)
+                if self.gl_widget.apply_texture_path(channel, path, material_uid=material_uid):
+                    any_applied = True
         finally:
             self._syncing_texture_set_ui = False
 
+        if any_applied:
+            self._persist_texture_overrides_for_current()
         self._update_status(self._current_model_index())
         self._refresh_overlay_data()
         self._refresh_validation_data()
@@ -1427,6 +1434,80 @@ class MainWindow(QMainWindow):
                 channel_paths.insert(0, path)
         return texture_paths, texture_sets
 
+    def _texture_override_payload_from_state(self):
+        channels = [ch for ch, _ in self.material_channels]
+        payload = {"version": 1}
+
+        global_overrides = {}
+        for channel in channels:
+            value = self.gl_widget.channel_overrides.get(channel)
+            if value is not None:
+                global_overrides[channel] = str(value or "")
+        if global_overrides:
+            payload["global"] = global_overrides
+
+        material_overrides = {}
+        for material_uid, mapping in (self.gl_widget.material_channel_overrides or {}).items():
+            if not material_uid or not isinstance(mapping, dict):
+                continue
+            row = {}
+            for channel in channels:
+                value = mapping.get(channel)
+                if value is not None:
+                    row[channel] = str(value or "")
+            if row:
+                material_overrides[str(material_uid)] = row
+        if material_overrides:
+            payload["materials"] = material_overrides
+
+        if "global" not in payload and "materials" not in payload:
+            return {}
+        return payload
+
+    def _persist_texture_overrides_for_current(self):
+        if self._restoring_texture_overrides:
+            return
+        source_path = self.current_file_path or self._active_load_file_path or self._current_selected_path() or ""
+        if not source_path:
+            return
+        payload = self._texture_override_payload_from_state()
+        set_asset_texture_overrides(source_path, payload, db_path=self.catalog_db_path)
+
+    def _restore_texture_overrides_for_file(self, file_path: str):
+        if not file_path:
+            return
+        payload = get_asset_texture_overrides(file_path, db_path=self.catalog_db_path)
+        if not payload:
+            return
+
+        channels = [ch for ch, _ in self.material_channels]
+        global_overrides = payload.get("global") if isinstance(payload, dict) else {}
+        material_overrides = payload.get("materials") if isinstance(payload, dict) else {}
+        self._restoring_texture_overrides = True
+        try:
+            if isinstance(global_overrides, dict):
+                for channel in channels:
+                    if channel not in global_overrides:
+                        continue
+                    value = global_overrides.get(channel)
+                    if not isinstance(value, str):
+                        continue
+                    self.gl_widget.apply_texture_path(channel, value, material_uid="")
+
+            if isinstance(material_overrides, dict):
+                for material_uid, mapping in material_overrides.items():
+                    if not material_uid or not isinstance(mapping, dict):
+                        continue
+                    for channel in channels:
+                        if channel not in mapping:
+                            continue
+                        value = mapping.get(channel)
+                        if not isinstance(value, str):
+                            continue
+                        self.gl_widget.apply_texture_path(channel, value, material_uid=str(material_uid))
+        finally:
+            self._restoring_texture_overrides = False
+
     def _on_material_channel_changed(self, channel):
         self._apply_channel_texture(channel)
 
@@ -1450,7 +1531,8 @@ class MainWindow(QMainWindow):
         if combo is None:
             return
         path = combo.currentData()
-        self.gl_widget.apply_texture_path(channel, path or "", material_uid=self._selected_material_uid())
+        if self.gl_widget.apply_texture_path(channel, path or "", material_uid=self._selected_material_uid()):
+            self._persist_texture_overrides_for_current()
         self._update_status(self._current_model_index())
         self._sync_texture_set_selection_from_current_channels()
         self._refresh_validation_data()
@@ -1785,6 +1867,7 @@ class MainWindow(QMainWindow):
             return
 
         self.current_file_path = file_path
+        self._restore_texture_overrides_for_file(file_path)
         self._update_favorite_button_for_current()
         self._populate_material_controls(self.gl_widget.last_texture_sets)
         self._refresh_overlay_data(file_path)

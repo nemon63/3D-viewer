@@ -340,6 +340,82 @@ def set_asset_preview(source_path, preview_path, width=None, height=None, kind="
         conn.close()
 
 
+def get_asset_texture_overrides(source_path, db_path=None):
+    db_path = db_path or get_default_db_path()
+    if not os.path.isfile(db_path) or not source_path:
+        return {}
+    source_path = os.path.abspath(source_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            """
+            SELECT o.overrides_json
+            FROM assets a
+            JOIN asset_texture_overrides o ON o.asset_id = a.id
+            WHERE a.source_path = ?
+            LIMIT 1
+            """,
+            (source_path,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row is None or not row["overrides_json"]:
+        return {}
+    try:
+        payload = json.loads(row["overrides_json"])
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def set_asset_texture_overrides(source_path, overrides, db_path=None):
+    db_path = init_catalog_db(db_path)
+    if not source_path:
+        return
+    source_path = os.path.abspath(source_path)
+    payload = overrides if isinstance(overrides, dict) else {}
+    now = _utc_now_iso()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA foreign_keys=ON;")
+        asset_id = _ensure_asset_id(conn, source_path, now)
+        if payload:
+            conn.execute(
+                """
+                INSERT INTO asset_texture_overrides(asset_id, overrides_json, updated_at)
+                VALUES(?, ?, ?)
+                ON CONFLICT(asset_id) DO UPDATE SET
+                    overrides_json = excluded.overrides_json,
+                    updated_at = excluded.updated_at
+                """,
+                (asset_id, json.dumps(payload, ensure_ascii=False), now),
+            )
+            _insert_event(
+                conn,
+                asset_id,
+                "texture_overrides_saved",
+                {"path": source_path, "materials": len((payload.get("materials") or {})), "global": bool(payload.get("global"))},
+                now,
+            )
+        else:
+            conn.execute("DELETE FROM asset_texture_overrides WHERE asset_id=?", (asset_id,))
+            _insert_event(
+                conn,
+                asset_id,
+                "texture_overrides_cleared",
+                {"path": source_path},
+                now,
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _load_existing_assets(conn, root):
     like_root = root + os.sep + "%"
     rows = conn.execute(
@@ -373,6 +449,15 @@ def _insert_asset(conn, name, source_path, now):
         (name, source_path, now, now, now),
     )
     return int(cur.lastrowid)
+
+
+def _ensure_asset_id(conn, source_path: str, now: str) -> int:
+    row = conn.execute("SELECT id FROM assets WHERE source_path=? LIMIT 1", (source_path,)).fetchone()
+    if row is None:
+        return _insert_asset(conn, os.path.basename(source_path), source_path, now)
+    asset_id = int(row["id"] if isinstance(row, sqlite3.Row) else row[0])
+    conn.execute("UPDATE assets SET updated_at=?, last_seen_at=? WHERE id=?", (now, now, asset_id))
+    return asset_id
 
 
 def _upsert_geometry(conn, asset_id, item, now):

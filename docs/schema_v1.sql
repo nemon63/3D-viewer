@@ -112,6 +112,14 @@ CREATE TABLE IF NOT EXISTS previews (
     FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS asset_texture_overrides (
+    id INTEGER PRIMARY KEY,
+    asset_id INTEGER NOT NULL UNIQUE,
+    overrides_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS validation_results (
     id INTEGER PRIMARY KEY,
     asset_id INTEGER NOT NULL,
@@ -179,6 +187,7 @@ CREATE INDEX IF NOT EXISTS idx_assets_updated_at ON assets(updated_at);
 CREATE INDEX IF NOT EXISTS idx_assets_favorite ON assets(favorite);
 CREATE INDEX IF NOT EXISTS idx_geometries_asset_id ON geometries(asset_id);
 CREATE INDEX IF NOT EXISTS idx_textures_filename ON texture_files(filename);
+CREATE INDEX IF NOT EXISTS idx_asset_texture_overrides_asset_id ON asset_texture_overrides(asset_id);
 CREATE INDEX IF NOT EXISTS idx_variants_asset_pipeline ON variants(asset_id, pipeline_id);
 CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
