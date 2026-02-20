@@ -69,6 +69,7 @@ class MainWindow(QMainWindow):
         self.filtered_model_files = []
         self.favorite_paths = set()
         self.current_file_path = ""
+        self._selected_model_path = ""
         self.model_extensions = (".obj", ".fbx", ".stl", ".ply", ".glb", ".gltf", ".off", ".dae")
         self.material_channels = [
             ("basecolor", "BaseColor/Diffuse"),
@@ -860,6 +861,7 @@ class MainWindow(QMainWindow):
         self.filtered_model_files = []
         self._model_item_by_path = {}
         self.current_file_path = ""
+        self._selected_model_path = ""
         self._dir_scan_auto_select_first = bool(auto_select_first)
         self.model_list.clear()
         self._refresh_catalog_dock_items(preview_map_raw={})
@@ -1061,19 +1063,14 @@ class MainWindow(QMainWindow):
         self._start_async_model_load(row, file_path)
 
     def _current_selected_path(self):
-        tree_path = ""
-        item = self.model_list.currentItem()
-        if item is not None:
-            tree_path = item.data(0, Qt.UserRole) or ""
-        dock_path = ""
+        if self._batch_running and self._batch_current_path:
+            return self._batch_current_path
         if self.catalog_panel is not None:
             dock_path = self.catalog_panel.current_path()
-        if self._batch_running and tree_path:
-            return tree_path
-        if dock_path:
-            return dock_path
-        if tree_path:
-            return tree_path
+            if dock_path:
+                return dock_path
+        if self._selected_model_path:
+            return self._selected_model_path
         return self.current_file_path or ""
 
     def _current_model_index(self):
@@ -1089,6 +1086,7 @@ class MainWindow(QMainWindow):
         if index < 0 or index >= len(self.filtered_model_files):
             return
         path = self.filtered_model_files[index]
+        self._selected_model_path = path
         norm = os.path.normcase(os.path.normpath(os.path.abspath(path)))
         item = self._model_item_by_path.get(norm)
         if item is None:
@@ -1101,6 +1099,7 @@ class MainWindow(QMainWindow):
     def _open_model_by_path(self, path: str):
         if not path:
             return
+        self._selected_model_path = path
         try:
             idx = self.filtered_model_files.index(path)
         except ValueError:
@@ -1870,6 +1869,7 @@ class MainWindow(QMainWindow):
             return
 
         self.current_file_path = file_path
+        self._selected_model_path = file_path
         self._restore_texture_overrides_for_file(file_path)
         self._update_favorite_button_for_current()
         self._populate_material_controls(self.gl_widget.last_texture_sets)
