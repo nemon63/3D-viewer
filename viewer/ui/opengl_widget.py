@@ -233,6 +233,8 @@ float computeShadow(vec3 N, vec3 L) {
 
     float ndotl = max(dot(N, L), 0.0);
     float bias = max(uShadowBias, uShadowBias * (1.0 + 2.0 * (1.0 - ndotl)));
+    float texelBias = uShadowTexelSize.x * (1.5 + 2.0 * uShadowSoftness);
+    bias = max(bias, texelBias);
     float shadow = 0.0;
     for (int x = -1; x <= 1; ++x) {
         for (int y = -1; y <= 1; ++y) {
@@ -379,6 +381,8 @@ float computeShadow() {
     }
 
     float bias = max(uShadowBias, 0.0001);
+    float texelBias = uShadowTexelSize.x * (1.5 + 2.0 * uShadowSoftness);
+    bias = max(bias, texelBias);
     float shadow = 0.0;
     for (int x = -1; x <= 1; ++x) {
         for (int y = -1; y <= 1; ++y) {
@@ -999,13 +1003,37 @@ class OpenGLWidget(QOpenGLWidget):
         shadow_distance = max(4.0, self.model_radius * 6.0)
         light_pos = target + light_dir * shadow_distance
         light_view = self._look_at_matrix(light_pos, target, np.array([0.0, 1.0, 0.0], dtype=np.float32))
-        cover_radius = max(0.6, self.model_radius * 1.45)
-        near = max(0.1, shadow_distance - cover_radius * 2.5)
-        far = shadow_distance + cover_radius * 2.5
-        half_fov = np.arctan(cover_radius / max(shadow_distance, 1e-4))
-        fov_deg = np.degrees(half_fov * 2.0) * 1.6
-        fov_deg = min(max(float(fov_deg), 35.0), 110.0)
-        light_proj = self._perspective_matrix(fov_deg, 1.0, near, far)
+        cover_radius = max(0.8, self.model_radius * 1.55)
+        margin = cover_radius * 0.18
+
+        # Stable directional-light bounds in light space (orthographic shadow map).
+        corners_world = []
+        for sx in (-1.0, 1.0):
+            for sy in (-1.0, 1.0):
+                for sz in (-1.0, 1.0):
+                    corners_world.append(
+                        np.array(
+                            [
+                                target[0] + sx * cover_radius,
+                                target[1] + sy * cover_radius,
+                                target[2] + sz * cover_radius,
+                                1.0,
+                            ],
+                            dtype=np.float32,
+                        )
+                    )
+        light_corners = [np.dot(light_view, c) for c in corners_world]
+        xs = [float(v[0]) for v in light_corners]
+        ys = [float(v[1]) for v in light_corners]
+        zs = [float(v[2]) for v in light_corners]
+
+        left = min(xs) - margin
+        right = max(xs) + margin
+        bottom = min(ys) - margin
+        top = max(ys) + margin
+        depth_near = max(0.05, min([-z for z in zs]) - margin)
+        depth_far = max(depth_near + 0.1, max([-z for z in zs]) + margin)
+        light_proj = self._ortho_matrix(left, right, bottom, top, depth_near, depth_far)
         self._light_vp = np.dot(light_proj, light_view).astype(np.float32)
 
         glBindFramebuffer(GL_FRAMEBUFFER, self.shadow_fbo)
@@ -1017,6 +1045,8 @@ class OpenGLWidget(QOpenGLWidget):
             return
         glViewport(0, 0, self.shadow_size, self.shadow_size)
         glClear(GL_DEPTH_BUFFER_BIT)
+        glEnable(GL_CULL_FACE)
+        glCullFace(GL_FRONT)
         glEnable(GL_POLYGON_OFFSET_FILL)
         glPolygonOffset(2.0, 4.0)
 
@@ -1031,6 +1061,8 @@ class OpenGLWidget(QOpenGLWidget):
         finally:
             glUseProgram(0)
             glDisable(GL_POLYGON_OFFSET_FILL)
+            glCullFace(GL_BACK)
+            glDisable(GL_CULL_FACE)
             glBindFramebuffer(GL_FRAMEBUFFER, int(self.defaultFramebufferObject()))
             glViewport(0, 0, max(self.width(), 1), max(self.height(), 1))
 
