@@ -33,14 +33,13 @@ from viewer.ui.opengl_widget import OpenGLWidget
 from viewer.ui.catalog_dock import CatalogDockPanel
 from viewer.ui.theme import apply_ui_theme
 from viewer.controllers.batch_preview_controller import BatchPreviewController
+from viewer.controllers.catalog_controller import CatalogController
 from viewer.ui.workers import CatalogIndexWorker, DirectoryScanWorker, ModelLoadWorker
 from viewer.services.catalog_db import (
     get_asset_texture_overrides,
-    get_favorite_paths,
     get_preview_paths_for_assets,
     get_recent_events,
     init_catalog_db,
-    set_asset_favorite,
     set_asset_texture_overrides,
 )
 from viewer.services.pipeline_validation import (
@@ -116,6 +115,7 @@ class MainWindow(QMainWindow):
         self.settings_dock = None
         self._syncing_filters_from_dock = False
         self.main_toolbar = None
+        self.catalog_controller = CatalogController()
         self.batch_controller = BatchPreviewController(self.settings, self)
         self.batch_controller.requestLoad.connect(self._open_model_by_path)
         self.batch_controller.statusMessage.connect(self._set_status_text)
@@ -932,22 +932,10 @@ class MainWindow(QMainWindow):
         self._set_status_text(f"Directory scan failed: {error_text}")
 
     def _top_category(self, file_path: str) -> str:
-        if not self.current_directory:
-            return "Без категории"
-        try:
-            rel = os.path.relpath(file_path, self.current_directory)
-        except Exception:
-            return "Без категории"
-        rel = rel.replace("\\", "/")
-        if "/" in rel:
-            return rel.split("/", 1)[0]
-        return "Корень"
+        return self.catalog_controller.top_category(file_path, self.current_directory)
 
     def _populate_category_filter(self):
-        categories = []
-        for p in self.model_files:
-            categories.append(self._top_category(p))
-        unique = sorted(set(categories), key=lambda x: x.lower())
+        unique = self.catalog_controller.categories_for_models(self.model_files, self.current_directory)
         self._current_categories = unique
         prev = self.category_combo.currentText() if hasattr(self, "category_combo") else "Все"
         self.category_combo.blockSignals(True)
@@ -1027,18 +1015,13 @@ class MainWindow(QMainWindow):
                 kind="thumb",
             )
         preview_root = os.path.normcase(os.path.normpath(get_preview_cache_dir()))
-        preview_map = {}
-        items = []
-        for file_path in self.filtered_model_files:
-            norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
-            rel_display = os.path.relpath(file_path, self.current_directory) if self.current_directory else file_path
-            is_favorite = norm in self.favorite_paths
-            items.append((file_path, rel_display, is_favorite))
-            preview_path = preview_map_raw.get(norm)
-            if preview_path and os.path.isfile(preview_path):
-                pnorm = os.path.normcase(os.path.normpath(os.path.abspath(preview_path)))
-                if pnorm.startswith(preview_root + os.sep):
-                    preview_map[file_path] = preview_path
+        items, preview_map = self.catalog_controller.build_dock_items(
+            filtered_model_files=self.filtered_model_files,
+            root_directory=self.current_directory,
+            favorite_paths=self.favorite_paths,
+            preview_map_raw=preview_map_raw,
+            preview_root=preview_root,
+        )
         self.catalog_panel.set_items(items, preview_map)
 
     def _load_model_at_row(self, row):
@@ -2042,24 +2025,14 @@ class MainWindow(QMainWindow):
         prev_path = ""
         if keep_selection:
             prev_path = self._current_selected_path()
-
-        needle = (self.search_input.text() or "").strip().lower()
-        only_fav = self.only_favorites_checkbox.isChecked()
-        selected_category = self.category_combo.currentData()
-        filtered = []
-        for p in self.model_files:
-            rel = os.path.relpath(p, self.current_directory).lower() if self.current_directory else p.lower()
-            norm = os.path.normcase(os.path.normpath(os.path.abspath(p)))
-            category = self._top_category(p)
-            if needle and needle not in rel:
-                continue
-            if selected_category and selected_category != "all" and category != selected_category:
-                continue
-            if only_fav and norm not in self.favorite_paths:
-                continue
-            filtered.append(p)
-
-        self.filtered_model_files = filtered
+        self.filtered_model_files = self.catalog_controller.filter_models(
+            model_files=self.model_files,
+            root_directory=self.current_directory,
+            search_text=self.search_input.text(),
+            selected_category=self.category_combo.currentData(),
+            only_favorites=self.only_favorites_checkbox.isChecked(),
+            favorite_paths=self.favorite_paths,
+        )
         self._fill_model_list()
 
         if keep_selection and prev_path:
@@ -2080,19 +2053,16 @@ class MainWindow(QMainWindow):
                 self._select_model_by_index(0)
 
     def _refresh_favorites_from_db(self):
-        self.favorite_paths = get_favorite_paths(root=self.current_directory, db_path=self.catalog_db_path)
+        self.favorite_paths = self.catalog_controller.load_favorites(
+            root_directory=self.current_directory,
+            db_path=self.catalog_db_path,
+        )
 
     def _toggle_current_favorite(self):
         path = self._current_selected_path()
         if not path:
             return
-        norm = os.path.normcase(os.path.normpath(os.path.abspath(path)))
-        is_fav = norm in self.favorite_paths
-        set_asset_favorite(path, not is_fav, db_path=self.catalog_db_path)
-        if is_fav:
-            self.favorite_paths.discard(norm)
-        else:
-            self.favorite_paths.add(norm)
+        self.catalog_controller.toggle_favorite(path, self.favorite_paths, self.catalog_db_path)
         self._update_favorite_button_for_current()
         self._apply_model_filters(keep_selection=True)
         self._refresh_catalog_events()
