@@ -434,6 +434,13 @@ class MainWindow(QMainWindow):
         self.shadows_checkbox.stateChanged.connect(self._on_shadows_toggled)
         light_layout.addRow(self.shadows_checkbox)
 
+        self.shadow_quality_combo = QComboBox(self)
+        self.shadow_quality_combo.addItem("Draft", "draft")
+        self.shadow_quality_combo.addItem("Balanced", "balanced")
+        self.shadow_quality_combo.addItem("High", "high")
+        self.shadow_quality_combo.currentIndexChanged.connect(self._on_shadow_quality_changed)
+        light_layout.addRow("Shadow quality", self.shadow_quality_combo)
+
         self.shadow_opacity_label = QLabel("0.42", self)
         self.shadow_opacity_slider = QSlider(Qt.Horizontal, self)
         self.shadow_opacity_slider.setRange(0, 100)
@@ -890,6 +897,7 @@ class MainWindow(QMainWindow):
         shadow_opacity = self.settings.value("view/shadow_opacity_slider", 42, type=int)
         shadow_bias = self.settings.value("view/shadow_bias_slider", 12, type=int)
         shadow_softness = self.settings.value("view/shadow_softness_slider", 100, type=int)
+        shadow_quality = self.settings.value("view/shadow_quality", "balanced", type=str)
         alpha_cutoff = self.settings.value("view/alpha_cutoff_slider", 50, type=int)
         alpha_blend = self.settings.value("view/alpha_blend_slider", 100, type=int)
         alpha_mode = self.settings.value("view/alpha_mode", "cutout", type=str)
@@ -944,6 +952,9 @@ class MainWindow(QMainWindow):
         mode_idx = self.render_mode_combo.findData(render_mode)
         if mode_idx >= 0:
             self.render_mode_combo.setCurrentIndex(mode_idx)
+        shadow_quality_idx = self.shadow_quality_combo.findData(shadow_quality)
+        if shadow_quality_idx >= 0:
+            self.shadow_quality_combo.setCurrentIndex(shadow_quality_idx)
         self.shadows_checkbox.setChecked(bool(shadows))
         self.search_input.setText(search_text)
         self.only_favorites_checkbox.setChecked(bool(only_fav))
@@ -1783,6 +1794,12 @@ class MainWindow(QMainWindow):
         if self._settings_ready:
             self.settings.setValue("view/shadow_softness_slider", int(value))
 
+    def _on_shadow_quality_changed(self, _value: int):
+        quality = self.shadow_quality_combo.currentData() or "balanced"
+        self.gl_widget.set_shadow_quality(quality)
+        if self._settings_ready:
+            self.settings.setValue("view/shadow_quality", str(quality))
+
     def _on_background_brightness_changed(self, value: int):
         brightness = value / 100.0
         self.bg_brightness_label.setText(f"{brightness:.2f}")
@@ -1864,6 +1881,9 @@ class MainWindow(QMainWindow):
         self.shadow_opacity_slider.setValue(42)
         self.shadow_bias_slider.setValue(12)
         self.shadow_softness_slider.setValue(100)
+        qidx = self.shadow_quality_combo.findData("balanced")
+        if qidx >= 0:
+            self.shadow_quality_combo.setCurrentIndex(qidx)
         self._apply_background_color(QColor("#14233f"))
         if self._settings_ready:
             self.settings.setValue("view/bg_color_hex", "#14233f")

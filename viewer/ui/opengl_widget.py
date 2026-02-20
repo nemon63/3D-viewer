@@ -471,6 +471,7 @@ class OpenGLWidget(QOpenGLWidget):
         self.background_color = np.array([0.08, 0.10, 0.15], dtype=np.float32)
         self.background_gradient_strength = 1.0
         self.shadow_size = 1024
+        self.shadow_quality = "balanced"
         self.shadow_fbo = 0
         self.shadow_depth_tex = 0
         self.depth_shader_program = None
@@ -1593,6 +1594,38 @@ class OpenGLWidget(QOpenGLWidget):
                 self.enable_ground_shadow = False
                 self.shadow_status_message = "unsupported"
                 return False
+        finally:
+            self.doneCurrent()
+            self.update()
+
+    def _shadow_size_for_quality(self, quality: str) -> int:
+        q = str(quality or "balanced").strip().lower()
+        if q == "draft":
+            return 768
+        if q == "high":
+            return 2048
+        return 1024
+
+    def set_shadow_quality(self, quality: str):
+        q = str(quality or "balanced").strip().lower()
+        if q not in ("draft", "balanced", "high"):
+            q = "balanced"
+        new_size = self._shadow_size_for_quality(q)
+        self.shadow_quality = q
+        if int(new_size) == int(self.shadow_size):
+            return
+        self.shadow_size = int(new_size)
+
+        if self.context() is None:
+            self.update()
+            return
+
+        self.makeCurrent()
+        try:
+            if self.depth_shader_program is not None:
+                self._recreate_shadow_targets(self.shadow_size)
+                if self.enable_ground_shadow:
+                    self.shadow_status_message = "on"
         finally:
             self.doneCurrent()
             self.update()
