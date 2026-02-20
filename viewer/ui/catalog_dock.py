@@ -1,6 +1,6 @@
 import os
 
-from PyQt5.QtCore import QSize, Qt, pyqtSignal
+from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QCheckBox,
@@ -71,6 +71,7 @@ class CatalogDockPanel(QWidget):
     batchStartRequested = pyqtSignal()
     batchStopRequested = pyqtSignal()
     batchResumeRequested = pyqtSignal()
+    PREVIEW_PATH_ROLE = Qt.UserRole + 1
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -78,6 +79,14 @@ class CatalogDockPanel(QWidget):
         self.list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.list_widget.customContextMenuRequested.connect(self._on_context_menu_requested)
         self.list_widget.thumbSizeChanged.connect(self.thumbSizeChanged.emit)
+        self.list_widget.thumbSizeChanged.connect(self._on_thumb_size_changed)
+        self._icon_cache = {}
+        self._pending_icon_jobs = []
+        self._pending_icon_index = 0
+        self._icon_batch_size = 48
+        self._icon_timer = QTimer(self)
+        self._icon_timer.setSingleShot(True)
+        self._icon_timer.timeout.connect(self._process_pending_icons)
 
         self.choose_button = QPushButton("Выбрать папку", self)
         self.choose_button.clicked.connect(self.chooseDirectoryRequested.emit)
@@ -145,6 +154,9 @@ class CatalogDockPanel(QWidget):
 
     def set_items(self, items, preview_map):
         current_path = self.current_path()
+        self._icon_timer.stop()
+        self._pending_icon_jobs = []
+        self._pending_icon_index = 0
         self.list_widget.clear()
         target_item = None
         for path, rel_display, is_favorite in items:
@@ -156,14 +168,16 @@ class CatalogDockPanel(QWidget):
             item.setToolTip(rel_display)
             preview_path = preview_map.get(path, "")
             if preview_path and os.path.isfile(preview_path):
-                icon = self._build_icon(preview_path)
-                if not icon.isNull():
-                    item.setIcon(icon)
+                item.setData(self.PREVIEW_PATH_ROLE, preview_path)
+                self._pending_icon_jobs.append((item, preview_path))
+            else:
+                item.setData(self.PREVIEW_PATH_ROLE, "")
             self.list_widget.addItem(item)
             if current_path and os.path.normcase(os.path.normpath(current_path)) == os.path.normcase(os.path.normpath(path)):
                 target_item = item
         if target_item is not None:
             self.list_widget.setCurrentItem(target_item)
+        self._schedule_pending_icons()
 
     def current_path(self):
         item = self.list_widget.currentItem()
@@ -208,6 +222,7 @@ class CatalogDockPanel(QWidget):
             p = item.data(Qt.UserRole) or ""
             if os.path.normcase(os.path.normpath(p)) != norm:
                 continue
+            item.setData(self.PREVIEW_PATH_ROLE, preview_path or "")
             icon = self._build_icon(preview_path)
             if not icon.isNull():
                 item.setIcon(icon)
@@ -220,6 +235,7 @@ class CatalogDockPanel(QWidget):
             p = item.data(Qt.UserRole) or ""
             if os.path.normcase(os.path.normpath(p)) != norm:
                 continue
+            item.setData(self.PREVIEW_PATH_ROLE, "")
             item.setIcon(QIcon())
             break
 
@@ -249,6 +265,10 @@ class CatalogDockPanel(QWidget):
         )
 
     def _build_icon(self, preview_path: str):
+        key = (os.path.normcase(os.path.normpath(preview_path)), int(self.list_widget.thumb_size))
+        cached = self._icon_cache.get(key)
+        if cached is not None:
+            return cached
         pixmap = QPixmap(preview_path)
         if pixmap.isNull():
             return QIcon()
@@ -256,7 +276,48 @@ class CatalogDockPanel(QWidget):
         # Force icon pixmap to current thumbnail size, so Ctrl+wheel resize
         # updates visible card size immediately even for old small previews.
         scaled = pixmap.scaled(target, target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        return QIcon(scaled)
+        icon = QIcon(scaled)
+        self._icon_cache[key] = icon
+        return icon
+
+    def _on_thumb_size_changed(self, _size: int):
+        self._icon_cache.clear()
+        self._icon_timer.stop()
+        self._pending_icon_jobs = []
+        self._pending_icon_index = 0
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            preview_path = item.data(self.PREVIEW_PATH_ROLE) or ""
+            if preview_path and os.path.isfile(preview_path):
+                self._pending_icon_jobs.append((item, preview_path))
+            else:
+                item.setIcon(QIcon())
+        self._schedule_pending_icons()
+
+    def _schedule_pending_icons(self):
+        if not self._pending_icon_jobs:
+            return
+        if self._icon_timer.isActive():
+            return
+        self._icon_timer.start(0)
+
+    def _process_pending_icons(self):
+        total = len(self._pending_icon_jobs)
+        if total <= 0:
+            self._pending_icon_index = 0
+            return
+        end = min(total, self._pending_icon_index + self._icon_batch_size)
+        for idx in range(self._pending_icon_index, end):
+            item, preview_path = self._pending_icon_jobs[idx]
+            icon = self._build_icon(preview_path)
+            if not icon.isNull():
+                item.setIcon(icon)
+        self._pending_icon_index = end
+        if self._pending_icon_index < total:
+            self._icon_timer.start(0)
+        else:
+            self._pending_icon_jobs = []
+            self._pending_icon_index = 0
 
     def _on_item_double_clicked(self, item):
         path = item.data(Qt.UserRole) or ""

@@ -1,3 +1,5 @@
+import os
+
 from PyQt5.QtCore import QObject, pyqtSignal
 
 from viewer.loaders.model_loader import load_model_payload
@@ -42,3 +44,27 @@ class CatalogIndexWorker(QObject):
             self.finished.emit(summary)
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+class DirectoryScanWorker(QObject):
+    finished = pyqtSignal(int, str, object)
+    failed = pyqtSignal(int, str)
+
+    def __init__(self, request_id: int, directory: str, model_extensions: tuple):
+        super().__init__()
+        self.request_id = int(request_id)
+        self.directory = directory
+        self.model_extensions = tuple(model_extensions or ())
+
+    def run(self):
+        try:
+            files = []
+            base_dir = self.directory
+            for root, _, names in os.walk(base_dir):
+                for name in names:
+                    if name.lower().endswith(self.model_extensions):
+                        files.append(os.path.join(root, name))
+            files.sort(key=lambda p: os.path.relpath(p, base_dir).lower())
+            self.finished.emit(self.request_id, self.directory, files)
+        except Exception as exc:
+            self.failed.emit(self.request_id, str(exc))

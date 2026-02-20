@@ -32,7 +32,7 @@ from PyQt5.QtWidgets import (
 from viewer.ui.opengl_widget import OpenGLWidget
 from viewer.ui.catalog_dock import CatalogDockPanel
 from viewer.ui.theme import apply_ui_theme
-from viewer.ui.workers import CatalogIndexWorker, ModelLoadWorker
+from viewer.ui.workers import CatalogIndexWorker, DirectoryScanWorker, ModelLoadWorker
 from viewer.services.catalog_db import (
     get_favorite_paths,
     get_preview_paths_for_assets,
@@ -87,6 +87,10 @@ class MainWindow(QMainWindow):
         self._load_request_id = 0
         self._active_load_row = -1
         self._active_load_file_path = ""
+        self._dir_scan_thread = None
+        self._dir_scan_worker = None
+        self._dir_scan_request_id = 0
+        self._dir_scan_auto_select_first = True
         self._index_thread = None
         self._index_worker = None
         self._last_index_summary = None
@@ -834,6 +838,20 @@ class MainWindow(QMainWindow):
         self.settings.setValue("last_directory", directory)
         self.directory_label.setText(directory)
         self.open_catalog_panel_button.setToolTip(f"Каталог: {directory}")
+        self.model_files = []
+        self.filtered_model_files = []
+        self._model_item_by_path = {}
+        self.current_file_path = ""
+        self._dir_scan_auto_select_first = bool(auto_select_first)
+        self.model_list.clear()
+        self._refresh_catalog_dock_items(preview_map_raw={})
+        self._sync_filters_to_dock()
+        self._refresh_validation_data()
+        self._set_status_text("Scanning models...")
+        self._start_directory_scan(directory, auto_select_first=auto_select_first)
+        self._start_index_scan(directory)
+        self._update_batch_ui()
+        return
         self.model_files = self._scan_models(directory)
         self._populate_category_filter()
         self._restore_category_filter(self._pending_category_filter)
@@ -858,6 +876,68 @@ class MainWindow(QMainWindow):
             return
 
         self._set_status_text(f"Найдено моделей: {len(self.filtered_model_files)}")
+
+    def _start_directory_scan(self, directory: str, auto_select_first: bool):
+        self._dir_scan_request_id += 1
+        request_id = self._dir_scan_request_id
+        self._dir_scan_auto_select_first = bool(auto_select_first)
+
+        thread = QThread(self)
+        worker = DirectoryScanWorker(request_id, directory, self.model_extensions)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_directory_scan_finished)
+        worker.failed.connect(self._on_directory_scan_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._dir_scan_thread = thread
+        self._dir_scan_worker = worker
+        thread.start()
+
+    def _on_directory_scan_finished(self, request_id: int, directory: str, files):
+        if request_id != self._dir_scan_request_id:
+            return
+        if directory != self.current_directory:
+            return
+
+        self.model_files = list(files or [])
+        self._populate_category_filter()
+        self.category_combo.blockSignals(True)
+        try:
+            self._restore_category_filter(self._pending_category_filter)
+        finally:
+            self.category_combo.blockSignals(False)
+        self._refresh_favorites_from_db()
+        self._apply_model_filters(keep_selection=False)
+
+        if not self.filtered_model_files:
+            self.current_file_path = ""
+            self._refresh_validation_data()
+            self._set_status_text("No supported models in selected folder.")
+            return
+
+        if self._dir_scan_auto_select_first:
+            self._select_model_by_index(0)
+        else:
+            self.model_list.clearSelection()
+            self._set_status_text(
+                f"Found models: {len(self.filtered_model_files)}. Auto-load disabled, choose a model manually."
+            )
+            return
+
+        self._set_status_text(f"Found models: {len(self.filtered_model_files)}")
+
+    def _on_directory_scan_failed(self, request_id: int, error_text: str):
+        if request_id != self._dir_scan_request_id:
+            return
+        self.model_files = []
+        self.filtered_model_files = []
+        self._model_item_by_path = {}
+        self.model_list.clear()
+        self._refresh_catalog_dock_items(preview_map_raw={})
+        self._set_status_text(f"Directory scan failed: {error_text}")
 
     def _scan_models(self, directory):
         files = []
@@ -904,13 +984,17 @@ class MainWindow(QMainWindow):
         else:
             self.category_combo.setCurrentIndex(0)
 
-    def _fill_model_list(self):
-        preview_map = get_preview_paths_for_assets(
-            self.filtered_model_files,
-            db_path=self.catalog_db_path,
-            kind="thumb",
-        )
+    def _fill_model_list(self, preview_map_raw=None):
+        if preview_map_raw is None:
+            preview_map = get_preview_paths_for_assets(
+                self.filtered_model_files,
+                db_path=self.catalog_db_path,
+                kind="thumb",
+            )
+        else:
+            preview_map = preview_map_raw
         preview_root = os.path.normcase(os.path.normpath(get_preview_cache_dir()))
+        load_tree_icons = self.model_list.isVisible()
         self.model_list.clear()
         self._model_item_by_path = {}
         category_roots = {}
@@ -937,7 +1021,7 @@ class MainWindow(QMainWindow):
                 preview_norm = os.path.normcase(os.path.normpath(os.path.abspath(preview_path)))
                 if not preview_norm.startswith(preview_root + os.sep):
                     preview_path = ""
-            if preview_path and os.path.isfile(preview_path):
+            if load_tree_icons and preview_path and os.path.isfile(preview_path):
                 self._preview_icon_cache[norm] = preview_path
                 pix = QPixmap(preview_path)
                 icon = QIcon(pix.scaled(self._thumb_size, self._thumb_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
@@ -948,17 +1032,18 @@ class MainWindow(QMainWindow):
 
         for i in range(self.model_list.topLevelItemCount()):
             self.model_list.topLevelItem(i).setExpanded(True)
-        self._refresh_catalog_dock_items()
+        self._refresh_catalog_dock_items(preview_map_raw=preview_map)
         self._sync_filters_to_dock()
 
-    def _refresh_catalog_dock_items(self):
+    def _refresh_catalog_dock_items(self, preview_map_raw=None):
         if self.catalog_panel is None:
             return
-        preview_map_raw = get_preview_paths_for_assets(
-            self.filtered_model_files,
-            db_path=self.catalog_db_path,
-            kind="thumb",
-        )
+        if preview_map_raw is None:
+            preview_map_raw = get_preview_paths_for_assets(
+                self.filtered_model_files,
+                db_path=self.catalog_db_path,
+                kind="thumb",
+            )
         preview_root = os.path.normcase(os.path.normpath(get_preview_cache_dir()))
         preview_map = {}
         items = []
