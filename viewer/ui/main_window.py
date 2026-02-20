@@ -324,6 +324,15 @@ class MainWindow(QMainWindow):
         self.render_mode_combo.currentIndexChanged.connect(self._on_render_mode_changed)
         camera_layout.addRow("Режим", self.render_mode_combo)
 
+        self.auto_collapse_label = QLabel("96", self)
+        self.auto_collapse_slider = QSlider(Qt.Horizontal, self)
+        self.auto_collapse_slider.setRange(0, 1200)
+        self.auto_collapse_slider.setValue(96)
+        self.auto_collapse_slider.setToolTip("0 = выключить авто-схлопывание сабмешей")
+        self.auto_collapse_slider.valueChanged.connect(self._on_auto_collapse_changed)
+        camera_layout.addRow("Auto collapse (submeshes)", self.auto_collapse_slider)
+        camera_layout.addRow("Collapse >=", self.auto_collapse_label)
+
         self.rotate_speed_label = QLabel("1.00", self)
         self.rotate_speed_slider = QSlider(Qt.Horizontal, self)
         self.rotate_speed_slider.setRange(10, 300)
@@ -898,6 +907,7 @@ class MainWindow(QMainWindow):
         shadow_bias = self.settings.value("view/shadow_bias_slider", 12, type=int)
         shadow_softness = self.settings.value("view/shadow_softness_slider", 100, type=int)
         shadow_quality = self.settings.value("view/shadow_quality", "balanced", type=str)
+        auto_collapse = self.settings.value("view/auto_collapse_submeshes", 96, type=int)
         alpha_cutoff = self.settings.value("view/alpha_cutoff_slider", 50, type=int)
         alpha_blend = self.settings.value("view/alpha_blend_slider", 100, type=int)
         alpha_mode = self.settings.value("view/alpha_mode", "cutout", type=str)
@@ -926,6 +936,7 @@ class MainWindow(QMainWindow):
         self.shadow_opacity_slider.setValue(max(self.shadow_opacity_slider.minimum(), min(self.shadow_opacity_slider.maximum(), shadow_opacity)))
         self.shadow_bias_slider.setValue(max(self.shadow_bias_slider.minimum(), min(self.shadow_bias_slider.maximum(), shadow_bias)))
         self.shadow_softness_slider.setValue(max(self.shadow_softness_slider.minimum(), min(self.shadow_softness_slider.maximum(), shadow_softness)))
+        self.auto_collapse_slider.setValue(max(self.auto_collapse_slider.minimum(), min(self.auto_collapse_slider.maximum(), auto_collapse)))
         self.alpha_cutoff_slider.setValue(max(self.alpha_cutoff_slider.minimum(), min(self.alpha_cutoff_slider.maximum(), alpha_cutoff)))
         self.alpha_blend_slider.setValue(max(self.alpha_blend_slider.minimum(), min(self.alpha_blend_slider.maximum(), alpha_blend)))
 
@@ -1714,6 +1725,13 @@ class MainWindow(QMainWindow):
             if 0 <= row < len(self.filtered_model_files):
                 self._load_model_at_row(row)
 
+    def _on_auto_collapse_changed(self, value: int):
+        threshold = int(max(0, value))
+        self.auto_collapse_label.setText(str(threshold))
+        self.gl_widget.set_auto_collapse_submesh_threshold(threshold)
+        if self._settings_ready:
+            self.settings.setValue("view/auto_collapse_submeshes", int(threshold))
+
     def _on_rotate_speed_changed(self, value: int):
         speed = value / 500.0
         self.rotate_speed_label.setText(f"{speed:.2f}")
@@ -1858,6 +1876,7 @@ class MainWindow(QMainWindow):
     def _reset_camera_settings(self):
         self.rotate_speed_slider.setValue(100)
         self.zoom_speed_slider.setValue(110)
+        self.auto_collapse_slider.setValue(96)
         idx = self.projection_combo.findData("perspective")
         if idx >= 0:
             self.projection_combo.setCurrentIndex(idx)

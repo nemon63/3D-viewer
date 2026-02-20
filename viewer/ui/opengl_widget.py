@@ -464,6 +464,7 @@ class OpenGLWidget(QOpenGLWidget):
         self.fill_light_intensity = 10.0
         self.alpha_cutoff = 0.5
         self.fast_mode = False
+        self.auto_collapse_submesh_threshold = 96
         self.enable_ground_shadow = False
         self.shadow_requested = False
         self.shadow_status_message = "off"
@@ -718,15 +719,40 @@ class OpenGLWidget(QOpenGLWidget):
         if self.vertices.size == 0 or self.indices.size == 0 or self.shader_program is None:
             return
 
+        effective_fast_mode = self.fast_mode
         glPushMatrix()
         self._apply_model_translation()
         glUseProgram(self.shader_program)
         try:
-            self._set_common_uniforms()
+            self._set_common_uniforms(effective_fast_mode=effective_fast_mode)
             draw_entries = []
-            if self.submeshes:
+            material_count = int((self.last_debug_info or {}).get("material_count", 0) or 0)
+            submesh_count = len(self.submeshes or [])
+            threshold = int(max(0, self.auto_collapse_submesh_threshold))
+            collapse_draws = bool(self.submeshes) and (
+                effective_fast_mode
+                or (threshold > 0 and material_count <= 1 and submesh_count >= threshold)
+            )
+            if collapse_draws:
+                # Performance mode for heavily fragmented meshes:
+                # avoid hundreds of draw calls by rendering combined index buffer once.
+                global_paths = self.get_effective_texture_paths(material_uid="")
+                tex_ids = {
+                    CHANNEL_BASE: self._get_or_create_texture_id(global_paths.get(CHANNEL_BASE, "")),
+                    CHANNEL_METAL: 0 if effective_fast_mode else self._get_or_create_texture_id(global_paths.get(CHANNEL_METAL, "")),
+                    CHANNEL_ROUGH: 0 if effective_fast_mode else self._get_or_create_texture_id(global_paths.get(CHANNEL_ROUGH, "")),
+                    CHANNEL_NORMAL: 0 if effective_fast_mode else self._get_or_create_texture_id(global_paths.get(CHANNEL_NORMAL, "")),
+                }
+                base_path = str(global_paths.get(CHANNEL_BASE) or "")
+                has_alpha = bool(self.texture_alpha_cache.get(base_path, False))
+                swizzles = {
+                    "metal": self._default_channel_swizzle(CHANNEL_METAL, global_paths.get(CHANNEL_METAL, "")),
+                    "roughness": self._default_channel_swizzle(CHANNEL_ROUGH, global_paths.get(CHANNEL_ROUGH, "")),
+                }
+                draw_entries.append((self.indices, tex_ids, has_alpha, swizzles))
+            elif self.submeshes:
                 for submesh in self.submeshes:
-                    tex_ids, has_alpha, swizzles = self._resolve_submesh_textures(submesh)
+                    tex_ids, has_alpha, swizzles = self._resolve_submesh_textures(submesh, effective_fast_mode=effective_fast_mode)
                     draw_entries.append((submesh["indices"], tex_ids, has_alpha, swizzles))
             else:
                 global_paths = self.get_effective_texture_paths()
@@ -749,7 +775,7 @@ class OpenGLWidget(QOpenGLWidget):
                         opaque_entries.append(entry)
 
                 for draw_indices, tex_ids, has_alpha, swizzles in opaque_entries:
-                    self._set_material_uniforms(tex_ids, has_alpha, swizzles)
+                    self._set_material_uniforms(tex_ids, has_alpha, swizzles, effective_fast_mode=effective_fast_mode)
                     self._draw_mesh_indices(draw_indices)
 
                 if transparent_entries:
@@ -760,18 +786,24 @@ class OpenGLWidget(QOpenGLWidget):
                     glEnable(GL_CULL_FACE)
                     glCullFace(GL_FRONT)
                     for draw_indices, tex_ids, has_alpha, swizzles in transparent_entries:
-                        self._set_material_uniforms(tex_ids, has_alpha, swizzles)
+                        self._set_material_uniforms(tex_ids, has_alpha, swizzles, effective_fast_mode=effective_fast_mode)
                         self._draw_mesh_indices(draw_indices)
                     glCullFace(GL_BACK)
                     for draw_indices, tex_ids, has_alpha, swizzles in transparent_entries:
-                        self._set_material_uniforms(tex_ids, has_alpha, swizzles)
+                        self._set_material_uniforms(tex_ids, has_alpha, swizzles, effective_fast_mode=effective_fast_mode)
                         self._draw_mesh_indices(draw_indices)
                     glDisable(GL_CULL_FACE)
                     glDisable(GL_BLEND)
             else:
+                use_cutout_culling = effective_fast_mode and self.alpha_render_mode == "cutout"
+                if use_cutout_culling:
+                    glEnable(GL_CULL_FACE)
+                    glCullFace(GL_BACK)
                 for draw_indices, tex_ids, has_alpha, swizzles in draw_entries:
-                    self._set_material_uniforms(tex_ids, has_alpha, swizzles)
+                    self._set_material_uniforms(tex_ids, has_alpha, swizzles, effective_fast_mode=effective_fast_mode)
                     self._draw_mesh_indices(draw_indices)
+                if use_cutout_culling:
+                    glDisable(GL_CULL_FACE)
         finally:
             self._unbind_texture_units()
             glUseProgram(0)
@@ -820,14 +852,14 @@ class OpenGLWidget(QOpenGLWidget):
         super().resizeEvent(event)
         self._update_overlay_label_geometry()
 
-    def _set_common_uniforms(self):
+    def _set_common_uniforms(self, effective_fast_mode: bool = False):
         self._set_sampler_uniform("uBaseColorTex", 0)
         self._set_sampler_uniform("uMetalTex", 1)
         self._set_sampler_uniform("uRoughTex", 2)
         self._set_sampler_uniform("uNormalTex", 3)
         self._set_sampler_uniform("uShadowMap", 4)
         self._set_int_uniform("uUnlitTexturePreview", 1 if self.unlit_texture_preview else 0)
-        self._set_int_uniform("uFastMode", 1 if self.fast_mode else 0)
+        self._set_int_uniform("uFastMode", 1 if effective_fast_mode else 0)
         self._set_int_uniform("uFlipNormalY", 1 if self._normal_y_flip_enabled() else 0)
         self._set_float_uniform("uAlphaCutoff", self.alpha_cutoff)
         self._set_float_uniform("uBlendOpacity", self.alpha_blend_opacity)
@@ -857,9 +889,9 @@ class OpenGLWidget(QOpenGLWidget):
             glUniform2f(location, texel, texel)
         self._bind_texture_unit(4, self.shadow_depth_tex)
 
-    def _set_material_uniforms(self, texture_ids, has_base_alpha: bool, swizzles=None):
+    def _set_material_uniforms(self, texture_ids, has_base_alpha: bool, swizzles=None, effective_fast_mode: bool = False):
         base_tex = int(texture_ids.get(CHANNEL_BASE, 0) or 0)
-        if self.fast_mode:
+        if effective_fast_mode:
             metal_tex = 0
             rough_tex = 0
             normal_tex = 0
@@ -1104,7 +1136,7 @@ class OpenGLWidget(QOpenGLWidget):
         glActiveTexture(active)
         glBindTexture(GL_TEXTURE_2D, int(texture_id) if texture_id else 0)
 
-    def _resolve_submesh_textures(self, submesh):
+    def _resolve_submesh_textures(self, submesh, effective_fast_mode: bool = False):
         texture_paths = submesh.get("texture_paths") or {}
         material_uid = str(submesh.get("material_uid") or "")
         material_overrides = self.material_channel_overrides.get(material_uid, {}) if material_uid else {}
@@ -1121,7 +1153,7 @@ class OpenGLWidget(QOpenGLWidget):
             if override is not None:
                 resolved[ch] = override
                 continue
-            if self.fast_mode and ch != CHANNEL_BASE:
+            if effective_fast_mode and ch != CHANNEL_BASE:
                 resolved[ch] = ""
                 continue
             # If model has explicit per-material texture mapping, empty channel must stay empty.
@@ -1310,6 +1342,10 @@ class OpenGLWidget(QOpenGLWidget):
         self._get_or_create_texture_id(path)
         if self._warmup_queue:
             self._warmup_timer.start(0)
+
+    def set_auto_collapse_submesh_threshold(self, value: int):
+        self.auto_collapse_submesh_threshold = max(0, int(value))
+        self.update()
 
     def _draw_mesh_positions_only(self):
         glEnableClientState(GL_VERTEX_ARRAY)
