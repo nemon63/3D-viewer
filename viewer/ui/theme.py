@@ -10,6 +10,24 @@ def apply_ui_theme(widget, theme: str):
             QLineEdit, QComboBox, QListWidget, QTreeWidget, QTabWidget::pane {
                 background: #25272b; color: #e4e7eb; border: 1px solid #3a3d43;
             }
+            QTreeWidget {
+                alternate-background-color: #2a2d33;
+            }
+            QTreeWidget::item {
+                color: #e4e7eb;
+            }
+            QTreeWidget::item:selected,
+            QTreeWidget::item:selected:active,
+            QTreeWidget::item:selected:!active {
+                background: #3f6db3;
+                color: #ffffff;
+            }
+            QHeaderView::section {
+                background: #2b2f35;
+                color: #d8dce3;
+                border: 1px solid #3f444d;
+                padding: 3px 6px;
+            }
             QGroupBox {
                 border: 1px solid #4a4f58; margin-top: 10px; padding-top: 8px;
             }
@@ -38,6 +56,24 @@ def apply_ui_theme(widget, theme: str):
         QWidget { background: #2b2f36; color: #eceff4; }
         QLineEdit, QComboBox, QListWidget, QTreeWidget, QTabWidget::pane {
             background: #323741; color: #eceff4; border: 1px solid #4a5362;
+        }
+        QTreeWidget {
+            alternate-background-color: #39404c;
+        }
+        QTreeWidget::item {
+            color: #eceff4;
+        }
+        QTreeWidget::item:selected,
+        QTreeWidget::item:selected:active,
+        QTreeWidget::item:selected:!active {
+            background: #4f78bf;
+            color: #ffffff;
+        }
+        QHeaderView::section {
+            background: #3a404c;
+            color: #dce3ee;
+            border: 1px solid #586273;
+            padding: 3px 6px;
         }
         QGroupBox {
             border: 1px solid #5c6678; margin-top: 10px; padding-top: 8px;
