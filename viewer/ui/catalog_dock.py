@@ -215,6 +215,11 @@ class CatalogDockPanel(QWidget):
     def batch_mode(self):
         return self.batch_mode_combo.currentData() or "missing_all"
 
+    def set_batch_mode(self, mode: str):
+        idx = self.batch_mode_combo.findData(mode or "missing_all")
+        if idx >= 0:
+            self.batch_mode_combo.setCurrentIndex(idx)
+
     def set_item_icon(self, path: str, preview_path: str):
         norm = os.path.normcase(os.path.normpath(path))
         for i in range(self.list_widget.count()):

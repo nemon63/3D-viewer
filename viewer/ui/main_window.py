@@ -119,6 +119,9 @@ class MainWindow(QMainWindow):
         self._batch_paths = []
         self._batch_index = 0
         self._batch_current_path = ""
+        self._batch_mode = "missing_all"
+        self._batch_root = ""
+        self._batch_thumb_size = 0
         self.profile_config, self.profile_config_error = load_profiles_config()
         self.pipeline_coverage_rows = []
         self.validation_rows = []
@@ -1053,7 +1056,7 @@ class MainWindow(QMainWindow):
         if row < 0 or row >= len(self.filtered_model_files):
             return
         file_path = self.filtered_model_files[row]
-        if not self._confirm_heavy_model_load(file_path):
+        if (not self._batch_running) and (not self._confirm_heavy_model_load(file_path)):
             return
         self._start_async_model_load(row, file_path)
 
@@ -2054,6 +2057,9 @@ class MainWindow(QMainWindow):
         self._batch_paused = False
         self._batch_running = bool(self._batch_paths)
         self._batch_current_path = ""
+        self._batch_mode = str(mode)
+        self._batch_root = os.path.normcase(os.path.normpath(os.path.abspath(self.current_directory)))
+        self._batch_thumb_size = int(self._thumb_size)
         self._save_batch_state()
         self._update_batch_ui()
         if not self._batch_running:
@@ -2083,6 +2089,11 @@ class MainWindow(QMainWindow):
             return
         if self._batch_index >= len(self._batch_paths):
             self._set_status_text("Batch: уже завершен.")
+            return
+        if not self._is_batch_context_valid():
+            self._set_status_text(
+                "Batch resume заблокирован: изменилась папка/режим/размер превью. Нажми 'Старт batch'."
+            )
             return
         self._batch_running = True
         self._batch_paused = False
@@ -2122,6 +2133,9 @@ class MainWindow(QMainWindow):
         self._batch_paths = []
         self._batch_index = 0
         self._batch_current_path = ""
+        self._batch_mode = "missing_all"
+        self._batch_root = ""
+        self._batch_thumb_size = 0
         self._save_batch_state()
         self._update_batch_ui()
         self._set_status_text(f"Batch: завершено, обработано {done} моделей.")
@@ -2131,6 +2145,9 @@ class MainWindow(QMainWindow):
             self.settings.setValue("batch/paths_json", json.dumps(self._batch_paths, ensure_ascii=False))
             self.settings.setValue("batch/index", int(self._batch_index))
             self.settings.setValue("batch/paused", bool(self._batch_paused))
+            self.settings.setValue("batch/mode", self._batch_mode or "missing_all")
+            self.settings.setValue("batch/root", self._batch_root or "")
+            self.settings.setValue("batch/thumb_size", int(self._batch_thumb_size or 0))
         except Exception:
             pass
 
@@ -2144,12 +2161,40 @@ class MainWindow(QMainWindow):
             paths = []
         idx = self.settings.value("batch/index", 0, type=int)
         paused = self.settings.value("batch/paused", False, type=bool)
+        mode = self.settings.value("batch/mode", "missing_all", type=str)
+        root = self.settings.value("batch/root", "", type=str)
+        thumb_size = self.settings.value("batch/thumb_size", 0, type=int)
         valid_paths = [p for p in paths if isinstance(p, str) and os.path.isfile(p)]
+        self._batch_mode = str(mode or "missing_all")
+        self._batch_root = str(root or "")
+        self._batch_thumb_size = int(thumb_size or 0)
         self._batch_paths = valid_paths
         self._batch_index = max(0, min(int(idx), len(self._batch_paths)))
         self._batch_paused = bool(paused and self._batch_paths and self._batch_index < len(self._batch_paths))
+        if self.catalog_panel is not None:
+            self.catalog_panel.set_batch_mode(self._batch_mode)
+        if not self._is_batch_context_valid():
+            self._batch_paths = []
+            self._batch_index = 0
+            self._batch_paused = False
+            self._batch_mode = "missing_all"
+            self._batch_root = ""
+            self._batch_thumb_size = 0
         self._batch_running = False
         self._batch_current_path = ""
+
+    def _is_batch_context_valid(self) -> bool:
+        if not self._batch_paths:
+            return False
+        current_root = os.path.normcase(os.path.normpath(os.path.abspath(self.current_directory))) if self.current_directory else ""
+        if not self._batch_root or self._batch_root != current_root:
+            return False
+        if int(self._batch_thumb_size or 0) != int(self._thumb_size):
+            return False
+        current_mode = self.catalog_panel.batch_mode() if self.catalog_panel is not None else self._batch_mode
+        if (current_mode or "missing_all") != (self._batch_mode or "missing_all"):
+            return False
+        return True
 
     def _update_batch_ui(self):
         if self.catalog_panel is None:
