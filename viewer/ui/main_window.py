@@ -495,6 +495,7 @@ class MainWindow(QMainWindow):
         self._on_blend_base_alpha_changed(self.blend_base_alpha_checkbox.checkState())
         self._on_rotate_speed_changed(self.rotate_speed_slider.value())
         self._on_zoom_speed_changed(self.zoom_speed_slider.value())
+        self._on_auto_collapse_changed(self.auto_collapse_slider.value())
         self._on_ambient_changed(self.ambient_slider.value())
         self._on_key_light_changed(self.key_light_slider.value())
         self._on_fill_light_changed(self.fill_light_slider.value())
