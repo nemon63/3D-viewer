@@ -428,8 +428,9 @@ class MainWindow(QMainWindow):
         light_layout.addRow("Gradient", self.bg_gradient_slider)
         light_layout.addRow("Gradient x", self.bg_gradient_label)
 
-        self.shadows_checkbox = QCheckBox("Shadows (Experimental)", self)
+        self.shadows_checkbox = QCheckBox("Shadows", self)
         self.shadows_checkbox.setChecked(False)
+        self.shadows_checkbox.setToolTip("Тени доступны в качественном режиме. В быстром режиме отключаются.")
         self.shadows_checkbox.stateChanged.connect(self._on_shadows_toggled)
         light_layout.addRow(self.shadows_checkbox)
 
@@ -1667,6 +1668,7 @@ class MainWindow(QMainWindow):
         self.alpha_blend_label.setEnabled(is_blend)
         self.blend_base_alpha_checkbox.setEnabled(is_blend)
         self.gl_widget.set_use_base_alpha_in_blend(is_blend and self.blend_base_alpha_checkbox.isChecked())
+        self._on_shadows_toggled(self.shadows_checkbox.checkState())
         if self._settings_ready:
             self.settings.setValue("view/alpha_mode", mode)
 

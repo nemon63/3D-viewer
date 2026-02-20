@@ -40,6 +40,9 @@ from OpenGL.GL import (
     GL_FRAMEBUFFER_COMPLETE,
     GL_NEAREST,
     GL_CLAMP_TO_EDGE,
+    GL_CULL_FACE,
+    GL_BACK,
+    GL_FRONT,
     GL_NONE,
     GL_POLYGON_OFFSET_FILL,
     glActiveTexture,
@@ -62,6 +65,7 @@ from OpenGL.GL import (
     glGenFramebuffers,
     glDeleteFramebuffers,
     glCheckFramebufferStatus,
+    glCullFace,
     glGenTextures,
     glGetUniformLocation,
     glLoadIdentity,
@@ -662,7 +666,13 @@ class OpenGLWidget(QOpenGLWidget):
             gluPerspective(45.0, aspect, 0.1, 100.0)
 
     def paintGL(self):
-        if self.enable_ground_shadow and self.vertices.size and self.indices.size and self.depth_shader_program and self.shadow_fbo:
+        if (
+            self.enable_ground_shadow
+            and self.vertices.size
+            and self.indices.size
+            and self.depth_shader_program
+            and self.shadow_fbo
+        ):
             try:
                 self._render_shadow_map()
             except Exception:
@@ -737,9 +747,18 @@ class OpenGLWidget(QOpenGLWidget):
                 if transparent_entries:
                     glEnable(GL_BLEND)
                     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+                    # Two-sided rendering for alpha-blended geometry:
+                    # first back faces, then front faces for more stable composition.
+                    glEnable(GL_CULL_FACE)
+                    glCullFace(GL_FRONT)
                     for draw_indices, tex_ids, has_alpha, swizzles in transparent_entries:
                         self._set_material_uniforms(tex_ids, has_alpha, swizzles)
                         self._draw_mesh_indices(draw_indices)
+                    glCullFace(GL_BACK)
+                    for draw_indices, tex_ids, has_alpha, swizzles in transparent_entries:
+                        self._set_material_uniforms(tex_ids, has_alpha, swizzles)
+                        self._draw_mesh_indices(draw_indices)
+                    glDisable(GL_CULL_FACE)
                     glDisable(GL_BLEND)
             else:
                 for draw_indices, tex_ids, has_alpha, swizzles in draw_entries:
@@ -1555,6 +1574,9 @@ class OpenGLWidget(QOpenGLWidget):
         if mode not in ("cutout", "blend"):
             mode = "cutout"
         self.alpha_render_mode = mode
+        if self.shadow_requested:
+            if self.enable_ground_shadow:
+                self.shadow_status_message = "on"
         self.update()
 
     def set_use_base_alpha_in_blend(self, enabled: bool):
