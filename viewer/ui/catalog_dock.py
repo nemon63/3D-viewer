@@ -223,6 +223,7 @@ class CatalogDockPanel(QWidget):
             if os.path.normcase(os.path.normpath(p)) != norm:
                 continue
             item.setData(self.PREVIEW_PATH_ROLE, preview_path or "")
+            self._invalidate_icon_cache_for_path(preview_path)
             icon = self._build_icon(preview_path)
             if not icon.isNull():
                 item.setIcon(icon)
@@ -279,6 +280,14 @@ class CatalogDockPanel(QWidget):
         icon = QIcon(scaled)
         self._icon_cache[key] = icon
         return icon
+
+    def _invalidate_icon_cache_for_path(self, preview_path: str):
+        if not preview_path:
+            return
+        norm = os.path.normcase(os.path.normpath(preview_path))
+        stale_keys = [key for key in self._icon_cache.keys() if key and key[0] == norm]
+        for key in stale_keys:
+            self._icon_cache.pop(key, None)
 
     def _on_thumb_size_changed(self, _size: int):
         self._icon_cache.clear()

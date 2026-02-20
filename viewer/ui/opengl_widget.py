@@ -693,8 +693,16 @@ class OpenGLWidget(QOpenGLWidget):
                 draw_entries.append((self.indices, self.texture_ids, self.base_texture_has_alpha))
 
             if self.alpha_render_mode == "blend":
-                opaque_entries = [item for item in draw_entries if not item[2]]
-                transparent_entries = [item for item in draw_entries if item[2] and self.use_base_alpha_in_blend]
+                opaque_entries = []
+                transparent_entries = []
+                needs_constant_blend = float(self.alpha_blend_opacity) < 0.999
+                for entry in draw_entries:
+                    has_alpha = bool(entry[2])
+                    needs_blend = needs_constant_blend or (self.use_base_alpha_in_blend and has_alpha)
+                    if needs_blend:
+                        transparent_entries.append(entry)
+                    else:
+                        opaque_entries.append(entry)
 
                 for draw_indices, tex_ids, has_alpha in opaque_entries:
                     self._set_material_uniforms(tex_ids, has_alpha)
@@ -703,11 +711,9 @@ class OpenGLWidget(QOpenGLWidget):
                 if transparent_entries:
                     glEnable(GL_BLEND)
                     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-                    glDepthMask(False)
                     for draw_indices, tex_ids, has_alpha in transparent_entries:
                         self._set_material_uniforms(tex_ids, has_alpha)
                         self._draw_mesh_indices(draw_indices)
-                    glDepthMask(True)
                     glDisable(GL_BLEND)
             else:
                 for draw_indices, tex_ids, has_alpha in draw_entries:
@@ -809,13 +815,12 @@ class OpenGLWidget(QOpenGLWidget):
         self._set_int_uniform("uHasNormal", 1 if normal_tex else 0)
         alpha_mode = 0
         use_base_alpha = 0
-        if has_base_alpha:
-            if self.alpha_render_mode == "blend":
-                alpha_mode = 2
-                use_base_alpha = 1 if self.use_base_alpha_in_blend else 0
-            elif self.alpha_render_mode == "cutout":
-                alpha_mode = 1
-                use_base_alpha = 1
+        if self.alpha_render_mode == "blend":
+            alpha_mode = 2
+            use_base_alpha = 1 if (self.use_base_alpha_in_blend and has_base_alpha) else 0
+        elif self.alpha_render_mode == "cutout" and has_base_alpha:
+            alpha_mode = 1
+            use_base_alpha = 1
         self._set_int_uniform("uAlphaMode", alpha_mode)
         self._set_int_uniform("uUseBaseAlpha", use_base_alpha)
 
@@ -1108,13 +1113,34 @@ class OpenGLWidget(QOpenGLWidget):
         try:
             with Image.open(path) as img:
                 image_copy = img.copy()
-                has_alpha = image_copy.mode in ("RGBA", "LA") or ("transparency" in image_copy.info)
+                has_alpha = self._image_has_effective_alpha(image_copy)
                 texture_id = self._upload_texture_image(image_copy, old_texture_id=0, manage_context=False)
             self.texture_cache[path] = int(texture_id)
             self.texture_alpha_cache[path] = bool(has_alpha)
             return int(texture_id)
         except Exception:
             return 0
+
+    def _image_has_effective_alpha(self, image_copy) -> bool:
+        if Image is None or image_copy is None:
+            return False
+        try:
+            if image_copy.mode in ("RGBA", "LA"):
+                alpha = image_copy.getchannel("A")
+                extrema = alpha.getextrema()
+                if isinstance(extrema, tuple) and len(extrema) == 2:
+                    return int(extrema[0]) < 255
+                return True
+            if "transparency" in image_copy.info:
+                rgba = image_copy.convert("RGBA")
+                alpha = rgba.getchannel("A")
+                extrema = alpha.getextrema()
+                if isinstance(extrema, tuple) and len(extrema) == 2:
+                    return int(extrema[0]) < 255
+                return True
+        except Exception:
+            return False
+        return False
 
     def _start_texture_warmup(self):
         if self.fast_mode:
@@ -1527,7 +1553,7 @@ class OpenGLWidget(QOpenGLWidget):
         try:
             with Image.open(path) as img:
                 image_copy = img.copy()
-                has_alpha = image_copy.mode in ("RGBA", "LA") or ("transparency" in image_copy.info)
+                has_alpha = self._image_has_effective_alpha(image_copy)
                 texture_id = self._upload_texture_image(image_copy, old_texture_id=self.texture_ids[channel])
             self.texture_ids[channel] = texture_id
             self.last_texture_paths[channel] = path

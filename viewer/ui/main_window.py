@@ -849,33 +849,7 @@ class MainWindow(QMainWindow):
         self._refresh_validation_data()
         self._set_status_text("Scanning models...")
         self._start_directory_scan(directory, auto_select_first=auto_select_first)
-        self._start_index_scan(directory)
         self._update_batch_ui()
-        return
-        self.model_files = self._scan_models(directory)
-        self._populate_category_filter()
-        self._restore_category_filter(self._pending_category_filter)
-        self._refresh_favorites_from_db()
-        self._apply_model_filters(keep_selection=False)
-        self._start_index_scan(directory)
-        self._update_batch_ui()
-
-        if not self.filtered_model_files:
-            self.current_file_path = ""
-            self._refresh_validation_data()
-            self._set_status_text("В выбранной папке нет поддерживаемых моделей.")
-            return
-
-        if auto_select_first:
-            self._select_model_by_index(0)
-        else:
-            self.model_list.clearSelection()
-            self._set_status_text(
-                f"Найдено моделей: {len(self.filtered_model_files)}. Автозагрузка отключена, выбери модель вручную."
-            )
-            return
-
-        self._set_status_text(f"Найдено моделей: {len(self.filtered_model_files)}")
 
     def _start_directory_scan(self, directory: str, auto_select_first: bool):
         self._dir_scan_request_id += 1
@@ -911,6 +885,7 @@ class MainWindow(QMainWindow):
             self.category_combo.blockSignals(False)
         self._refresh_favorites_from_db()
         self._apply_model_filters(keep_selection=False)
+        self._start_index_scan(directory, scanned_paths=self.model_files)
 
         if not self.filtered_model_files:
             self.current_file_path = ""
@@ -1818,14 +1793,19 @@ class MainWindow(QMainWindow):
         if self._batch_running:
             self._advance_batch_after_item()
 
-    def _start_index_scan(self, directory: str):
+    def _start_index_scan(self, directory: str, scanned_paths=None):
         if not directory:
             return
         self._last_index_summary = None
         self._catalog_scan_text = "Индекс: сканирование..."
         self._sync_catalog_dialog_state()
         thread = QThread(self)
-        worker = CatalogIndexWorker(directory, self.model_extensions, self.catalog_db_path)
+        worker = CatalogIndexWorker(
+            directory,
+            self.model_extensions,
+            self.catalog_db_path,
+            scanned_paths=scanned_paths,
+        )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_index_scan_finished)
@@ -2203,6 +2183,7 @@ class MainWindow(QMainWindow):
             image=image,
             db_path=self.catalog_db_path,
             size=self._thumb_size,
+            force_rebuild=bool(force),
         )
         if not preview_path or not os.path.isfile(preview_path):
             if should_advance_batch and not advanced:

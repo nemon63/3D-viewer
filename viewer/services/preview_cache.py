@@ -1,5 +1,6 @@
 import hashlib
 import os
+import time
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QImage, QPainter
@@ -22,9 +23,9 @@ def build_preview_path_for_model(model_path, size=128):
     return os.path.join(get_preview_cache_dir(), f"{digest}.png")
 
 
-def save_viewport_preview(model_path, image: QImage, db_path=None, size=128):
+def save_viewport_preview(model_path, image: QImage, db_path=None, size=128, force_rebuild=False):
     out_path = build_preview_path_for_model(model_path, size=size)
-    if os.path.isfile(out_path):
+    if (not force_rebuild) and os.path.isfile(out_path):
         _save_preview_in_db(model_path, out_path, size, size, db_path=db_path)
         return out_path
     if image is None or image.isNull():
@@ -37,10 +38,30 @@ def save_viewport_preview(model_path, image: QImage, db_path=None, size=128):
     painter = QPainter(canvas)
     painter.drawImage(x, y, scaled)
     painter.end()
-    if not canvas.save(out_path, "PNG"):
-        return None
-    _save_preview_in_db(model_path, out_path, size, size, db_path=db_path)
-    return out_path
+
+    save_path = out_path
+    if force_rebuild and os.path.isfile(out_path):
+        tmp_path = out_path + ".tmp"
+        if not canvas.save(tmp_path, "PNG"):
+            return None
+        try:
+            os.replace(tmp_path, out_path)
+        except OSError:
+            try:
+                if os.path.isfile(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            fallback = os.path.splitext(out_path)[0] + f"_{int(time.time() * 1000)}.png"
+            if not canvas.save(fallback, "PNG"):
+                return None
+            save_path = fallback
+    else:
+        if not canvas.save(out_path, "PNG"):
+            return None
+
+    _save_preview_in_db(model_path, save_path, size, size, db_path=db_path)
+    return save_path
 
 
 def _save_preview_in_db(model_path, preview_path, width, height, db_path=None):

@@ -28,11 +28,12 @@ class CatalogIndexWorker(QObject):
     finished = pyqtSignal(dict)
     failed = pyqtSignal(str)
 
-    def __init__(self, directory: str, model_extensions: tuple, db_path: str):
+    def __init__(self, directory: str, model_extensions: tuple, db_path: str, scanned_paths=None):
         super().__init__()
         self.directory = directory
         self.model_extensions = model_extensions
         self.db_path = db_path
+        self.scanned_paths = list(scanned_paths or [])
 
     def run(self):
         try:
@@ -40,6 +41,7 @@ class CatalogIndexWorker(QObject):
                 self.directory,
                 self.model_extensions,
                 db_path=self.db_path,
+                scanned_paths=self.scanned_paths or None,
             )
             self.finished.emit(summary)
         except Exception as exc:

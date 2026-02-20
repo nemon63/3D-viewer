@@ -33,30 +33,42 @@ def init_catalog_db(db_path=None):
     return db_path
 
 
-def scan_and_index_directory(directory, model_extensions, db_path=None):
+def scan_and_index_directory(directory, model_extensions, db_path=None, scanned_paths=None):
     db_path = init_catalog_db(db_path)
     root = os.path.normcase(os.path.normpath(os.path.abspath(directory)))
     now = _utc_now_iso()
     t0 = time.perf_counter()
 
     scanned = {}
-    for cur_root, _, names in os.walk(root):
-        for name in names:
-            if not name.lower().endswith(model_extensions):
-                continue
-            full_path = os.path.abspath(os.path.join(cur_root, name))
-            norm = os.path.normcase(os.path.normpath(full_path))
-            try:
-                st = os.stat(full_path)
-            except OSError:
-                continue
-            scanned[norm] = {
-                "path": full_path,
-                "name": name,
-                "size": int(st.st_size),
-                "mtime": float(st.st_mtime),
-                "ext": os.path.splitext(name)[1].lower().lstrip("."),
-            }
+    if scanned_paths is None:
+        iter_paths = []
+        for cur_root, _, names in os.walk(root):
+            for name in names:
+                if not name.lower().endswith(model_extensions):
+                    continue
+                iter_paths.append(os.path.abspath(os.path.join(cur_root, name)))
+    else:
+        iter_paths = [os.path.abspath(p) for p in scanned_paths if p]
+
+    root_prefix = root + os.sep
+    for full_path in iter_paths:
+        name = os.path.basename(full_path)
+        if not name.lower().endswith(model_extensions):
+            continue
+        norm = os.path.normcase(os.path.normpath(full_path))
+        if norm != root and not norm.startswith(root_prefix):
+            continue
+        try:
+            st = os.stat(full_path)
+        except OSError:
+            continue
+        scanned[norm] = {
+            "path": full_path,
+            "name": name,
+            "size": int(st.st_size),
+            "mtime": float(st.st_mtime),
+            "ext": os.path.splitext(name)[1].lower().lstrip("."),
+        }
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
