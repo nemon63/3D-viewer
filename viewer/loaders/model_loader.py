@@ -287,14 +287,32 @@ def _merge_texture_paths(primary_paths: dict, fallback_sets: dict, hint_names=No
         candidates = fallback_sets.get(fallback_channel) or []
         merged[out_channel] = _pick_best_texture_path(candidates, hint_names=hint_names)
 
+    # Safe per-material companion matching:
+    # if basecolor exists, try to find channel maps with the same stem family.
+    base_path = merged.get("basecolor") or ""
+    if base_path:
+        if not merged.get("metal"):
+            merged["metal"] = _find_companion_texture(base_path, fallback_sets.get(CHANNEL_METAL) or [])
+        if not merged.get("roughness"):
+            merged["roughness"] = _find_companion_texture(base_path, fallback_sets.get(CHANNEL_ROUGHNESS) or [])
+        if not merged.get("normal"):
+            merged["normal"] = _find_companion_texture(base_path, fallback_sets.get(CHANNEL_NORMAL) or [])
+
     orm_path = merged.get("orm")
-    if not orm_path and (("metal" in fill_missing_channels) or ("roughness" in fill_missing_channels)):
-        orm_path = _pick_best_texture_path(fallback_sets.get(CHANNEL_ORM) or [], hint_names=hint_names)
+    orm_fits_base = False
+    if not orm_path:
+        orm_companion = _find_companion_texture(base_path, fallback_sets.get(CHANNEL_ORM) or []) if base_path else ""
+        if orm_companion:
+            orm_path = orm_companion
+            orm_fits_base = True
+        elif ("metal" in fill_missing_channels) or ("roughness" in fill_missing_channels):
+            orm_path = _pick_best_texture_path(fallback_sets.get(CHANNEL_ORM) or [], hint_names=hint_names)
     merged["orm"] = orm_path
     if orm_path:
-        if ("metal" in fill_missing_channels) and (not merged.get("metal")):
+        allow_orm_fill = ("metal" in fill_missing_channels) or ("roughness" in fill_missing_channels) or orm_fits_base
+        if allow_orm_fill and (not merged.get("metal")):
             merged["metal"] = orm_path
-        if ("roughness" in fill_missing_channels) and (not merged.get("roughness")):
+        if allow_orm_fill and (not merged.get("roughness")):
             merged["roughness"] = orm_path
     swizzles = dict((merged.get("channel_swizzles") or {}))
     if not swizzles:
@@ -306,6 +324,51 @@ def _merge_texture_paths(primary_paths: dict, fallback_sets: dict, hint_names=No
             swizzles["roughness"] = 1
     merged["channel_swizzles"] = {"metal": int(swizzles.get("metal", 0)), "roughness": int(swizzles.get("roughness", 0))}
     return merged
+
+
+_CHANNEL_SUFFIX_TOKENS = {
+    "dif",
+    "diff",
+    "albedo",
+    "base",
+    "basecolor",
+    "color",
+    "col",
+    "bc",
+    "met",
+    "metal",
+    "metallic",
+    "rgh",
+    "rough",
+    "roughness",
+    "nml",
+    "norm",
+    "normal",
+    "nor",
+    "ao",
+    "orm",
+    "occlusion",
+}
+
+
+def _stem_family_key(path: str):
+    if not path:
+        return ""
+    stem = os.path.splitext(os.path.basename(str(path).lower()))[0]
+    tokens = [tok for tok in re.split(r"[^a-z0-9]+", stem) if tok]
+    while tokens and tokens[-1] in _CHANNEL_SUFFIX_TOKENS:
+        tokens.pop()
+    return "_".join(tokens) if tokens else stem
+
+
+def _find_companion_texture(base_path: str, candidates):
+    base_key = _stem_family_key(base_path)
+    if not base_key:
+        return ""
+    for path in candidates or []:
+        if _stem_family_key(path) == base_key:
+            return path
+    return ""
 
 
 def _filter_texture_sets_by_hint(texture_sets: dict, hint_names=None):
@@ -482,6 +545,9 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
 
         if submeshes:
             model_hint = os.path.splitext(os.path.basename(file_path))[0]
+            # If scene uses a single material, fallback texture matching is safe for all PBR channels.
+            # For true multi-material scenes, only fill basecolor to avoid cross-material leakage.
+            fill_channels = {"basecolor"} if len(material_names) > 1 else {"basecolor", "metal", "roughness", "normal"}
             for submesh in submeshes:
                 base_paths = submesh.get("texture_paths") or {}
                 filtered_fallback = _filter_texture_sets_by_hint(
@@ -492,7 +558,7 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
                     base_paths,
                     filtered_fallback,
                     hint_names=[submesh.get("material_name"), submesh.get("object_name"), model_hint],
-                    fill_missing_channels={"basecolor"},
+                    fill_missing_channels=fill_channels,
                 )
         else:
             model_hint = os.path.splitext(os.path.basename(file_path))[0]

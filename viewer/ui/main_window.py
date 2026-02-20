@@ -36,13 +36,12 @@ from viewer.controllers.batch_preview_controller import BatchPreviewController
 from viewer.controllers.catalog_index_controller import CatalogIndexController
 from viewer.controllers.catalog_controller import CatalogController
 from viewer.controllers.directory_scan_controller import DirectoryScanController
+from viewer.controllers.material_controller import MaterialController
 from viewer.controllers.model_session_controller import ModelSessionController
 from viewer.services.catalog_db import (
-    get_asset_texture_overrides,
     get_preview_paths_for_assets,
     get_recent_events,
     init_catalog_db,
-    set_asset_texture_overrides,
 )
 from viewer.services.pipeline_validation import (
     evaluate_pipeline_coverage,
@@ -107,6 +106,7 @@ class MainWindow(QMainWindow):
         self._syncing_filters_from_dock = False
         self.main_toolbar = None
         self.catalog_controller = CatalogController()
+        self.material_controller = MaterialController(self.material_channels)
         self.directory_scan_controller = DirectoryScanController(self)
         self.directory_scan_controller.scanFinished.connect(self._on_directory_scan_finished)
         self.directory_scan_controller.scanFailed.connect(self._on_directory_scan_failed)
@@ -261,6 +261,9 @@ class MainWindow(QMainWindow):
         apply_preview_button = QPushButton("Показать карту канала", self)
         apply_preview_button.clicked.connect(self._apply_preview_channel)
         material_layout.addRow(apply_preview_button)
+        reset_overrides_button = QPushButton("Сбросить overrides", self)
+        reset_overrides_button.clicked.connect(self._reset_texture_overrides_for_current)
+        material_layout.addRow(reset_overrides_button)
 
         self.alpha_cutoff_label = QLabel("0.50", self)
         self.alpha_cutoff_slider = QSlider(Qt.Horizontal, self)
@@ -1205,50 +1208,7 @@ class MainWindow(QMainWindow):
         self._refresh_material_channel_controls()
 
     def _material_targets_from_submeshes(self):
-        grouped = {}
-        for sub in self.gl_widget.submeshes or []:
-            uid = str(sub.get("material_uid") or "").strip()
-            name = str(sub.get("material_name") or "").strip() or "material"
-            obj = str(sub.get("object_name") or "").strip()
-            if not uid:
-                uid = f"{name}::{obj}" if obj else name
-            entry = grouped.setdefault(
-                uid,
-                {
-                    "uid": uid,
-                    "name": name,
-                    "objects": set(),
-                    "submesh_count": 0,
-                },
-            )
-            if obj:
-                entry["objects"].add(obj)
-            entry["submesh_count"] += 1
-
-        targets = []
-        for uid, info in grouped.items():
-            label = f"{info['name']} [{info['submesh_count']}]"
-            targets.append(
-                {
-                    "uid": uid,
-                    "name": info["name"],
-                    "label": label,
-                    "objects": sorted(info["objects"]),
-                    "submesh_count": info["submesh_count"],
-                }
-            )
-        targets.sort(key=lambda item: (item["name"].lower(), item["uid"].lower()))
-
-        targets.append(
-            {
-                "uid": "__global__",
-                "name": "Global",
-                "label": "All materials (global)",
-                "objects": [],
-                "submesh_count": len(self.gl_widget.submeshes or []),
-            }
-        )
-        return targets
+        return self.material_controller.material_targets_from_submeshes(self.gl_widget.submeshes or [])
 
     def _selected_material_uid(self):
         if self.material_target_combo is None:
@@ -1266,57 +1226,10 @@ class MainWindow(QMainWindow):
         return "Global" if not value or value == "__global__" else text
 
     def _material_texture_sets_for_target(self, material_uid: str):
-        out = {channel: [] for channel, _ in self.material_channels}
-        seen = {channel: set() for channel, _ in self.material_channels}
-
-        def _push(channel: str, path: str):
-            if not path:
-                return
-            key = os.path.normcase(os.path.normpath(str(path)))
-            if key in seen[channel]:
-                return
-            seen[channel].add(key)
-            out[channel].append(str(path))
-
-        if material_uid:
-            for sub in self.gl_widget.submeshes or []:
-                if str(sub.get("material_uid") or "") != material_uid:
-                    continue
-                paths = sub.get("texture_paths") or {}
-                for channel, _ in self.material_channels:
-                    _push(channel, paths.get(channel) or "")
-            overrides = (self.gl_widget.material_channel_overrides or {}).get(material_uid, {}) or {}
-            for channel, _ in self.material_channels:
-                value = overrides.get(channel)
-                if value:
-                    _push(channel, value)
-
-        for channel, _ in self.material_channels:
-            for path in (self.gl_widget.last_texture_sets or {}).get(channel, []) or []:
-                _push(channel, path)
-        return out
+        return self.material_controller.material_texture_sets_for_target(self.gl_widget, material_uid)
 
     def _global_material_channel_states(self):
-        states = {channel: {"state": "none", "path": ""} for channel, _ in self.material_channels}
-        rows = self.gl_widget.get_all_material_effective_textures() or {}
-        if not rows:
-            return states
-
-        for channel, _ in self.material_channels:
-            values = []
-            for row in rows.values():
-                tex_paths = row.get("texture_paths") or {}
-                values.append(str(tex_paths.get(channel) or ""))
-            uniq = set(values)
-            if len(uniq) == 1:
-                only = next(iter(uniq))
-                if only:
-                    states[channel] = {"state": "single", "path": only}
-                else:
-                    states[channel] = {"state": "none", "path": ""}
-            else:
-                states[channel] = {"state": "mixed", "path": ""}
-        return states
+        return self.material_controller.global_material_channel_states(self.gl_widget)
 
     def _refresh_material_channel_controls(self):
         material_uid = self._selected_material_uid()
@@ -1421,45 +1334,10 @@ class MainWindow(QMainWindow):
         self._refresh_validation_data()
 
     def _collect_effective_texture_channels(self, material_uid: str = ""):
-        texture_paths = dict(self.gl_widget.get_effective_texture_paths(material_uid=material_uid) or {})
-        texture_sets = self._material_texture_sets_for_target(material_uid=material_uid)
-        for channel, path in texture_paths.items():
-            if not path:
-                continue
-            channel_paths = texture_sets.setdefault(str(channel), [])
-            if path not in channel_paths:
-                channel_paths.insert(0, path)
-        return texture_paths, texture_sets
+        return self.material_controller.collect_effective_texture_channels(self.gl_widget, material_uid=material_uid)
 
     def _texture_override_payload_from_state(self):
-        channels = [ch for ch, _ in self.material_channels]
-        payload = {"version": 1}
-
-        global_overrides = {}
-        for channel in channels:
-            value = self.gl_widget.channel_overrides.get(channel)
-            if value is not None:
-                global_overrides[channel] = str(value or "")
-        if global_overrides:
-            payload["global"] = global_overrides
-
-        material_overrides = {}
-        for material_uid, mapping in (self.gl_widget.material_channel_overrides or {}).items():
-            if not material_uid or not isinstance(mapping, dict):
-                continue
-            row = {}
-            for channel in channels:
-                value = mapping.get(channel)
-                if value is not None:
-                    row[channel] = str(value or "")
-            if row:
-                material_overrides[str(material_uid)] = row
-        if material_overrides:
-            payload["materials"] = material_overrides
-
-        if "global" not in payload and "materials" not in payload:
-            return {}
-        return payload
+        return self.material_controller.texture_override_payload_from_state(self.gl_widget)
 
     def _persist_texture_overrides_for_current(self):
         if self._restoring_texture_overrides:
@@ -1467,41 +1345,24 @@ class MainWindow(QMainWindow):
         source_path = self.current_file_path or self.model_session_controller.active_path or self._current_selected_path() or ""
         if not source_path:
             return
-        payload = self._texture_override_payload_from_state()
-        set_asset_texture_overrides(source_path, payload, db_path=self.catalog_db_path)
+        self.material_controller.persist_texture_overrides(
+            file_path=source_path,
+            gl_widget=self.gl_widget,
+            db_path=self.catalog_db_path,
+        )
 
     def _restore_texture_overrides_for_file(self, file_path: str):
         if not file_path:
             return
-        payload = get_asset_texture_overrides(file_path, db_path=self.catalog_db_path)
+        payload = self.material_controller.load_texture_overrides_payload(
+            file_path=file_path,
+            db_path=self.catalog_db_path,
+        )
         if not payload:
             return
-
-        channels = [ch for ch, _ in self.material_channels]
-        global_overrides = payload.get("global") if isinstance(payload, dict) else {}
-        material_overrides = payload.get("materials") if isinstance(payload, dict) else {}
         self._restoring_texture_overrides = True
         try:
-            if isinstance(global_overrides, dict):
-                for channel in channels:
-                    if channel not in global_overrides:
-                        continue
-                    value = global_overrides.get(channel)
-                    if not isinstance(value, str):
-                        continue
-                    self.gl_widget.apply_texture_path(channel, value, material_uid="")
-
-            if isinstance(material_overrides, dict):
-                for material_uid, mapping in material_overrides.items():
-                    if not material_uid or not isinstance(mapping, dict):
-                        continue
-                    for channel in channels:
-                        if channel not in mapping:
-                            continue
-                        value = mapping.get(channel)
-                        if not isinstance(value, str):
-                            continue
-                        self.gl_widget.apply_texture_path(channel, value, material_uid=str(material_uid))
+            self.material_controller.apply_texture_overrides_payload(payload, self.gl_widget)
         finally:
             self._restoring_texture_overrides = False
 
@@ -1535,6 +1396,18 @@ class MainWindow(QMainWindow):
         self._update_status(self._current_model_index())
         self._sync_texture_set_selection_from_current_channels()
         self._refresh_validation_data()
+
+    def _reset_texture_overrides_for_current(self):
+        file_path = self.current_file_path or self._current_selected_path() or ""
+        if not file_path:
+            self._set_status_text("Нет активной модели для сброса overrides.")
+            return
+        self.material_controller.clear_texture_overrides(
+            file_path=file_path,
+            db_path=self.catalog_db_path,
+        )
+        self._set_status_text(f"Overrides сброшены: {os.path.basename(file_path)}")
+        self._open_model_by_path(file_path)
 
     def _refresh_overlay_data(self, file_path: str = ""):
         active_path = file_path or self.current_file_path or self._current_selected_path() or ""

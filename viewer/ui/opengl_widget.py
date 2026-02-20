@@ -1047,6 +1047,8 @@ class OpenGLWidget(QOpenGLWidget):
         material_uid = str(submesh.get("material_uid") or "")
         material_overrides = self.material_channel_overrides.get(material_uid, {}) if material_uid else {}
         has_explicit_material_paths = bool(texture_paths)
+        material_count = int((self.last_debug_info or {}).get("material_count", 0) or 0)
+        lock_empty_channels = has_explicit_material_paths and material_count > 1
         resolved = {}
         for ch in ALL_CHANNELS:
             material_override = material_overrides.get(ch)
@@ -1062,7 +1064,7 @@ class OpenGLWidget(QOpenGLWidget):
                 continue
             # If model has explicit per-material texture mapping, empty channel must stay empty.
             # Prevent leaking textures from other materials through global fallback.
-            if has_explicit_material_paths:
+            if lock_empty_channels:
                 path = texture_paths.get(ch) or ""
             else:
                 path = texture_paths.get(ch) or self.last_texture_paths.get(ch) or self._get_fallback_texture_path(ch)
@@ -1117,6 +1119,7 @@ class OpenGLWidget(QOpenGLWidget):
 
     def get_effective_texture_paths(self, material_uid: str = ""):
         out = {ch: "" for ch in ALL_CHANNELS}
+        material_count = int((self.last_debug_info or {}).get("material_count", 0) or 0)
         if material_uid:
             wanted_uid = str(material_uid)
             for sub in self.submeshes or []:
@@ -1131,6 +1134,8 @@ class OpenGLWidget(QOpenGLWidget):
                 value = mat_overrides.get(ch)
                 if value is not None:
                     out[ch] = value or ""
+                if not out[ch] and material_count <= 1:
+                    out[ch] = self._get_fallback_texture_path(ch)
         else:
             for sub in self.submeshes or []:
                 paths = sub.get("texture_paths") or {}
