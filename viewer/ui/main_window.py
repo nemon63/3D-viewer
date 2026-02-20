@@ -628,6 +628,13 @@ class MainWindow(QMainWindow):
         coverage_hint = QLabel("Покрытие по пайплайнам (сводка по обязательным картам):", self)
         coverage_hint.setStyleSheet("color: #AFC3DA;")
         layout.addWidget(coverage_hint)
+        self.validation_unreal_hint_label = QLabel(
+            "Примечание: для Unreal часть каналов может быть собрана из имеющихся карт (ORM: G=Roughness, B=Metal).",
+            self,
+        )
+        self.validation_unreal_hint_label.setWordWrap(True)
+        self.validation_unreal_hint_label.setStyleSheet("color: #8FA2B8;")
+        layout.addWidget(self.validation_unreal_hint_label)
 
         self.validation_coverage_tree = QTreeWidget(self)
         self.validation_coverage_tree.setRootIsDecorated(False)
@@ -752,11 +759,16 @@ class MainWindow(QMainWindow):
         self.validation_coverage_tree.clear()
         status_counts = {"ready": 0, "partial": 0, "missing": 0}
         pipelines_by_status = {"ready": set(), "partial": set(), "missing": set()}
+        scoped_status_counts = {"ready": 0, "partial": 0, "missing": 0}
         for row in self.pipeline_coverage_rows:
             status = row.get("status") or "missing"
             if status in status_counts:
                 status_counts[status] += 1
                 pipelines_by_status[status].add(row.get("pipeline") or "")
+            pipe_name = str(row.get("pipeline") or "")
+            if pipeline_filter == "all" or pipe_name == pipeline_filter:
+                if status in scoped_status_counts:
+                    scoped_status_counts[status] += 1
             if pipeline_filter != "all" and row.get("pipeline") != pipeline_filter:
                 continue
             if status_filter != "all" and status != status_filter:
@@ -789,11 +801,17 @@ class MainWindow(QMainWindow):
 
         self.validation_results_tree.clear()
         severity_counts = {"info": 0, "warn": 0, "error": 0}
+        scoped_severity_counts = {"info": 0, "warn": 0, "error": 0}
         for row in self.validation_rows:
             sev = str(row.get("severity") or "info")
             if sev in severity_counts:
                 severity_counts[sev] += 1
             pipe = str(row.get("pipeline") or "global")
+            if sev in scoped_severity_counts:
+                if pipeline_filter == "all":
+                    scoped_severity_counts[sev] += 1
+                elif pipe in ("global", pipeline_filter):
+                    scoped_severity_counts[sev] += 1
             if pipeline_filter != "all" and pipe not in ("global", pipeline_filter):
                 continue
             if severity_filter != "all" and sev != severity_filter:
@@ -829,20 +847,22 @@ class MainWindow(QMainWindow):
             summary += f"&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;<span style='color:#FF9A9A'>profiles.yaml: {self.profile_config_error}</span>"
         self.validation_summary_label.setText(summary)
 
+        badge_scope = "все пайплайны" if pipeline_filter == "all" else f"pipeline: {pipeline_filter}"
         badge_state = "OK"
         badge_color = "#7DDE92"
         badge_bg = "rgba(32, 84, 43, 0.45)"
-        if severity_counts["error"] > 0 or status_counts["missing"] > 0:
+        if scoped_severity_counts["error"] > 0 or scoped_status_counts["missing"] > 0:
             badge_state = "КРИТИЧНО"
             badge_color = "#FF9A9A"
             badge_bg = "rgba(110, 35, 35, 0.45)"
-        elif severity_counts["warn"] > 0 or status_counts["partial"] > 0:
+        elif scoped_severity_counts["warn"] > 0 or scoped_status_counts["partial"] > 0:
             badge_state = "ВНИМАНИЕ"
             badge_color = "#F3C969"
             badge_bg = "rgba(120, 84, 24, 0.45)"
         self.validation_health_badge.setText(
             f"<span style='color:#AFC3DA'>Состояние валидации:</span> "
             f"<span style='color:{badge_color}; font-weight:700'>{badge_state}</span>"
+            f"<span style='color:#8FA2B8'> ({badge_scope})</span>"
         )
         self.validation_health_badge.setStyleSheet(
             f"padding: 4px 8px; border: 1px solid rgba(255,255,255,40); border-radius: 4px; background:{badge_bg};"
