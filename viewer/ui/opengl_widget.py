@@ -233,7 +233,7 @@ float computeShadow(vec3 N, vec3 L) {
 
     float ndotl = max(dot(N, L), 0.0);
     float bias = max(uShadowBias, uShadowBias * (1.0 + 2.0 * (1.0 - ndotl)));
-    float texelBias = uShadowTexelSize.x * (1.5 + 2.0 * uShadowSoftness);
+    float texelBias = uShadowTexelSize.x * (0.35 + 0.6 * uShadowSoftness);
     bias = max(bias, texelBias);
     float shadow = 0.0;
     for (int x = -1; x <= 1; ++x) {
@@ -290,7 +290,8 @@ void main() {
     roughness = clamp(roughness, 0.05, 1.0);
     metallic = clamp(metallic, 0.0, 1.0);
 
-    vec3 N = normalize(vNormalView);
+    vec3 Ngeom = normalize(vNormalView);
+    vec3 N = Ngeom;
     if (uHasNormal == 1) {
         vec3 nMap = texture2D(uNormalTex, vUv).xyz * 2.0 - 1.0;
         if (uFlipNormalY == 1) {
@@ -312,7 +313,9 @@ void main() {
     vec3 V = normalize(-vPosView);
     vec3 F0 = mix(vec3(0.04), base, metallic);
     vec3 L0 = normalize(uLightDirView0);
-    float shadowFactor = computeShadow(N, L0);
+    // Important: shadow bias should use geometric normal, not normal-map perturbed normal.
+    // Otherwise high-frequency normal map detail creates shadow acne "striping".
+    float shadowFactor = computeShadow(Ngeom, L0);
 
     vec3 Lo = vec3(0.0);
     Lo += computeDirectionalLight(N, V, base, metallic, roughness, F0, uLightDirView0, uLightColor0) * shadowFactor;
@@ -381,7 +384,7 @@ float computeShadow() {
     }
 
     float bias = max(uShadowBias, 0.0001);
-    float texelBias = uShadowTexelSize.x * (1.5 + 2.0 * uShadowSoftness);
+    float texelBias = uShadowTexelSize.x * (0.35 + 0.6 * uShadowSoftness);
     bias = max(bias, texelBias);
     float shadow = 0.0;
     for (int x = -1; x <= 1; ++x) {
@@ -1045,8 +1048,6 @@ class OpenGLWidget(QOpenGLWidget):
             return
         glViewport(0, 0, self.shadow_size, self.shadow_size)
         glClear(GL_DEPTH_BUFFER_BIT)
-        glEnable(GL_CULL_FACE)
-        glCullFace(GL_FRONT)
         glEnable(GL_POLYGON_OFFSET_FILL)
         glPolygonOffset(2.0, 4.0)
 
@@ -1061,8 +1062,6 @@ class OpenGLWidget(QOpenGLWidget):
         finally:
             glUseProgram(0)
             glDisable(GL_POLYGON_OFFSET_FILL)
-            glCullFace(GL_BACK)
-            glDisable(GL_CULL_FACE)
             glBindFramebuffer(GL_FRAMEBUFFER, int(self.defaultFramebufferObject()))
             glViewport(0, 0, max(self.width(), 1), max(self.height(), 1))
 
