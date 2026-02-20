@@ -1,3 +1,4 @@
+import html
 import os
 
 import numpy as np
@@ -476,7 +477,7 @@ class OpenGLWidget(QOpenGLWidget):
         self.overlay_visible = False
         self.overlay_lines = []
         self.overlay_label = QLabel(self)
-        self.overlay_label.setTextFormat(Qt.PlainText)
+        self.overlay_label.setTextFormat(Qt.RichText)
         self.overlay_label.setWordWrap(True)
         self.overlay_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.overlay_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -753,7 +754,17 @@ class OpenGLWidget(QOpenGLWidget):
 
     def set_overlay_lines(self, lines):
         self.overlay_lines = [str(line) for line in (lines or []) if str(line).strip()]
-        self.overlay_label.setText("\n".join(self.overlay_lines) if self.overlay_lines else "No model loaded.")
+        if self.overlay_lines:
+            html_lines = []
+            for line in self.overlay_lines:
+                raw = str(line).strip()
+                if raw.startswith("<"):
+                    html_lines.append(raw)
+                else:
+                    html_lines.append(html.escape(raw))
+            self.overlay_label.setText("<br/>".join(html_lines))
+        else:
+            self.overlay_label.setText("No model loaded.")
         self._update_overlay_label_geometry()
 
     def set_overlay_visible(self, visible: bool):

@@ -1,7 +1,8 @@
 import json
 import os
+import html
 from PyQt5.QtCore import QSettings, QSize, Qt, QTimer
-from PyQt5.QtGui import QColor, QIcon, QPixmap
+from PyQt5.QtGui import QBrush, QColor, QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -580,57 +581,94 @@ class MainWindow(QMainWindow):
 
         filters = QHBoxLayout()
         self.validation_pipeline_combo = QComboBox(self)
-        self.validation_pipeline_combo.addItem("All pipelines", "all")
+        self.validation_pipeline_combo.addItem("Все пайплайны", "all")
         for code in sorted((self.profile_config.get("pipelines") or {}).keys()):
             self.validation_pipeline_combo.addItem(code, code)
         self.validation_pipeline_combo.currentIndexChanged.connect(self._render_validation_panel)
 
         self.validation_status_combo = QComboBox(self)
-        self.validation_status_combo.addItem("All statuses", "all")
-        self.validation_status_combo.addItem("ready", "ready")
-        self.validation_status_combo.addItem("partial", "partial")
-        self.validation_status_combo.addItem("missing", "missing")
+        self.validation_status_combo.addItem("Все статусы", "all")
+        self.validation_status_combo.addItem("Готово", "ready")
+        self.validation_status_combo.addItem("Частично", "partial")
+        self.validation_status_combo.addItem("Отсутствует", "missing")
         self.validation_status_combo.currentIndexChanged.connect(self._render_validation_panel)
 
         self.validation_severity_combo = QComboBox(self)
-        self.validation_severity_combo.addItem("All severities", "all")
-        self.validation_severity_combo.addItem("info", "info")
-        self.validation_severity_combo.addItem("warn", "warn")
-        self.validation_severity_combo.addItem("error", "error")
+        self.validation_severity_combo.addItem("Все уровни", "all")
+        self.validation_severity_combo.addItem("Инфо", "info")
+        self.validation_severity_combo.addItem("Предупреждения", "warn")
+        self.validation_severity_combo.addItem("Ошибки", "error")
         self.validation_severity_combo.currentIndexChanged.connect(self._render_validation_panel)
 
-        refresh_btn = QPushButton("Refresh", self)
+        refresh_btn = QPushButton("Обновить", self)
         refresh_btn.clicked.connect(self._refresh_validation_data)
 
-        filters.addWidget(QLabel("Pipeline", self))
+        filters.addWidget(QLabel("Пайплайн", self))
         filters.addWidget(self.validation_pipeline_combo)
-        filters.addWidget(QLabel("Coverage", self))
+        filters.addWidget(QLabel("Покрытие", self))
         filters.addWidget(self.validation_status_combo)
-        filters.addWidget(QLabel("Severity", self))
+        filters.addWidget(QLabel("Уровень", self))
         filters.addWidget(self.validation_severity_combo)
         filters.addStretch(1)
         filters.addWidget(refresh_btn)
         layout.addLayout(filters)
 
+        self.validation_health_badge = QLabel("Статус: нет данных", self)
+        self.validation_health_badge.setTextFormat(Qt.RichText)
+        self.validation_health_badge.setStyleSheet(
+            "padding: 4px 8px; border: 1px solid rgba(255,255,255,40); border-radius: 4px;"
+        )
+        layout.addWidget(self.validation_health_badge)
+
         self.validation_summary_label = QLabel("Validation: no data", self)
         self.validation_summary_label.setWordWrap(True)
+        self.validation_summary_label.setTextFormat(Qt.RichText)
         layout.addWidget(self.validation_summary_label)
+
+        coverage_hint = QLabel("Покрытие по пайплайнам (сводка по обязательным картам):", self)
+        coverage_hint.setStyleSheet("color: #AFC3DA;")
+        layout.addWidget(coverage_hint)
 
         self.validation_coverage_tree = QTreeWidget(self)
         self.validation_coverage_tree.setRootIsDecorated(False)
         self.validation_coverage_tree.setAlternatingRowColors(True)
         self.validation_coverage_tree.setColumnCount(4)
-        self.validation_coverage_tree.setHeaderLabels(["Pipeline", "Status", "Required", "Missing"])
+        self.validation_coverage_tree.setHeaderLabels(["Pipeline", "Статус", "Готовность", "Чего не хватает"])
+        self.validation_coverage_tree.setColumnWidth(0, 130)
+        self.validation_coverage_tree.setColumnWidth(1, 90)
+        self.validation_coverage_tree.setColumnWidth(2, 130)
         layout.addWidget(self.validation_coverage_tree, stretch=1)
+
+        self.validation_results_hint_label = QLabel(
+            "Детальные проверки (нижний блок): какие правила сработали и почему.",
+            self,
+        )
+        self.validation_results_hint_label.setStyleSheet("color: #AFC3DA;")
+        layout.addWidget(self.validation_results_hint_label)
 
         self.validation_results_tree = QTreeWidget(self)
         self.validation_results_tree.setRootIsDecorated(False)
         self.validation_results_tree.setAlternatingRowColors(True)
         self.validation_results_tree.setColumnCount(4)
-        self.validation_results_tree.setHeaderLabels(["Severity", "Pipeline", "Rule", "Message"])
+        self.validation_results_tree.setHeaderLabels(["Уровень", "Pipeline", "Правило", "Сообщение"])
+        self.validation_results_tree.setColumnWidth(0, 90)
+        self.validation_results_tree.setColumnWidth(1, 120)
+        self.validation_results_tree.setColumnWidth(2, 180)
         layout.addWidget(self.validation_results_tree, stretch=2)
 
         controls_tabs.addTab(validation_group, "Validation")
+
+    def _humanize_validation_message(self, rule_code: str, message: str) -> str:
+        text = str(message or "").strip()
+        rule = str(rule_code or "")
+        lower = text.lower()
+        if rule == "pipeline.required_channels":
+            if "missing required channels" in lower:
+                tail = text.split(":", 1)[1].strip() if ":" in text else text
+                return f"Не хватает обязательных карт: {tail}"
+            if "all required channels are present" in lower:
+                return "Все обязательные карты присутствуют"
+        return text
 
     def _refresh_validation_data(self, file_path: str = ""):
         if not hasattr(self, "validation_summary_label"):
@@ -696,6 +734,17 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "validation_summary_label"):
             return
 
+        status_ui = {
+            "ready": ("Готово", QColor("#7DDE92")),
+            "partial": ("Частично", QColor("#F3C969")),
+            "missing": ("Отсутствует", QColor("#FF9A9A")),
+        }
+        severity_ui = {
+            "info": ("info", QColor("#7DDE92")),
+            "warn": ("warn", QColor("#F3C969")),
+            "error": ("error", QColor("#FF9A9A")),
+        }
+
         pipeline_filter = self.validation_pipeline_combo.currentData() or "all"
         status_filter = self.validation_status_combo.currentData() or "all"
         severity_filter = self.validation_severity_combo.currentData() or "all"
@@ -722,11 +771,16 @@ class MainWindow(QMainWindow):
             item = QTreeWidgetItem(
                 [
                     str(row.get("pipeline") or ""),
-                    str(status),
+                    status_ui.get(status, (str(status), QColor("#DCE5F0")))[0],
                     required_text,
                     ", ".join(missing) if missing else "-",
                 ]
             )
+            item.setForeground(1, QBrush(status_ui.get(status, ("", QColor("#DCE5F0")))[1]))
+            if missing:
+                item.setForeground(3, QBrush(QColor("#FF9A9A")))
+            else:
+                item.setForeground(3, QBrush(QColor("#7DDE92")))
             self.validation_coverage_tree.addTopLevelItem(item)
 
         allowed_by_status = None
@@ -748,21 +802,51 @@ class MainWindow(QMainWindow):
                 continue
             item = QTreeWidgetItem(
                 [
-                    sev,
+                    severity_ui.get(sev, (sev, QColor("#DCE5F0")))[0],
                     pipe,
                     str(row.get("rule_code") or ""),
-                    str(row.get("message") or ""),
+                    self._humanize_validation_message(
+                        str(row.get("rule_code") or ""),
+                        str(row.get("message") or ""),
+                    ),
                 ]
             )
+            item.setForeground(0, QBrush(severity_ui.get(sev, (sev, QColor("#DCE5F0")))[1]))
             self.validation_results_tree.addTopLevelItem(item)
 
         summary = (
-            f"Pipelines ready/partial/missing: {status_counts['ready']}/{status_counts['partial']}/{status_counts['missing']} | "
-            f"Results info/warn/error: {severity_counts['info']}/{severity_counts['warn']}/{severity_counts['error']}"
+            f"<span style='color:#AFC3DA'>Pipelines:</span> "
+            f"<span style='color:#7DDE92;font-weight:600'>готово {status_counts['ready']}</span> / "
+            f"<span style='color:#F3C969;font-weight:600'>частично {status_counts['partial']}</span> / "
+            f"<span style='color:#FF9A9A;font-weight:600'>отсутствует {status_counts['missing']}</span>"
+            f"&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;"
+            f"<span style='color:#AFC3DA'>Проверки:</span> "
+            f"<span style='color:#7DDE92;font-weight:600'>info {severity_counts['info']}</span> / "
+            f"<span style='color:#F3C969;font-weight:600'>warn {severity_counts['warn']}</span> / "
+            f"<span style='color:#FF9A9A;font-weight:600'>error {severity_counts['error']}</span>"
         )
         if self.profile_config_error:
-            summary += f" | profiles.yaml: {self.profile_config_error}"
+            summary += f"&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;<span style='color:#FF9A9A'>profiles.yaml: {self.profile_config_error}</span>"
         self.validation_summary_label.setText(summary)
+
+        badge_state = "OK"
+        badge_color = "#7DDE92"
+        badge_bg = "rgba(32, 84, 43, 0.45)"
+        if severity_counts["error"] > 0 or status_counts["missing"] > 0:
+            badge_state = "КРИТИЧНО"
+            badge_color = "#FF9A9A"
+            badge_bg = "rgba(110, 35, 35, 0.45)"
+        elif severity_counts["warn"] > 0 or status_counts["partial"] > 0:
+            badge_state = "ВНИМАНИЕ"
+            badge_color = "#F3C969"
+            badge_bg = "rgba(120, 84, 24, 0.45)"
+        self.validation_health_badge.setText(
+            f"<span style='color:#AFC3DA'>Состояние валидации:</span> "
+            f"<span style='color:{badge_color}; font-weight:700'>{badge_state}</span>"
+        )
+        self.validation_health_badge.setStyleSheet(
+            f"padding: 4px 8px; border: 1px solid rgba(255,255,255,40); border-radius: 4px; background:{badge_bg};"
+        )
 
     def _restore_view_settings(self):
         rotate_speed = self.settings.value("view/rotate_speed_slider", 100, type=int)
@@ -1423,6 +1507,21 @@ class MainWindow(QMainWindow):
         def _name(path):
             return os.path.basename(path) if path else "-"
 
+        def _line(label: str, value: str, state: str = "info"):
+            palette = {
+                "ok": "#7DDE92",
+                "warn": "#F3C969",
+                "bad": "#FF9A9A",
+                "muted": "#A8B4C8",
+                "info": "#DCE5F0",
+            }
+            label_color = "#AFC3DA"
+            value_color = palette.get(state, palette["info"])
+            return (
+                f"<span style='color:{label_color};'>{html.escape(label)}: </span>"
+                f"<span style='color:{value_color}; font-weight:600;'>{html.escape(str(value))}</span>"
+            )
+
         material_uid = self._selected_material_uid()
         tex_paths, _ = self._collect_effective_texture_channels(material_uid=material_uid)
         if self.texture_set_combo is not None and self.texture_set_combo.currentData() not in (None, "__custom__"):
@@ -1430,20 +1529,34 @@ class MainWindow(QMainWindow):
         else:
             texture_set_label = "Custom"
         material_label = self._selected_material_label()
+        base_name = _name(tex_paths.get("basecolor", ""))
+        metal_name = _name(tex_paths.get("metal", ""))
+        rough_name = _name(tex_paths.get("roughness", ""))
+        normal_name = _name(tex_paths.get("normal", ""))
+        shadow_state = str(self.gl_widget.shadow_status_message or "off")
+        projection = "ortho" if self.gl_widget.projection_mode == "orthographic" else "perspective"
         lines = [
-            f"Model: {os.path.basename(active_path) if active_path else '-'}",
-            f"Vertices: {vertices:,}  Triangles: {triangles:,}",
-            f"Objects: {objects}  Submeshes: {submeshes}  Materials: {materials}",
-            f"Material target: {material_label}",
-            f"UV vertices: {uv_count:,}  Texture candidates: {tex_candidates}",
-            f"Texture set: {texture_set_label}",
-            f"Base: {_name(tex_paths.get('basecolor', ''))}",
-            f"Metal: {_name(tex_paths.get('metal', ''))}",
-            f"Rough: {_name(tex_paths.get('roughness', ''))}",
-            f"Normal: {_name(tex_paths.get('normal', ''))}",
-            f"Normal space: {self.gl_widget.normal_map_space}",
-            f"Alpha: {self.gl_widget.alpha_render_mode}  Base alpha: {'on' if self.gl_widget.use_base_alpha_in_blend else 'off'}  Blend: {self.gl_widget.alpha_blend_opacity:.2f}",
-            f"Projection: {self.gl_widget.projection_mode}  Shadows: {self.gl_widget.shadow_status_message}",
+            _line("Model", os.path.basename(active_path) if active_path else "-", "info"),
+            _line("Vertices / Triangles", f"{vertices:,} / {triangles:,}", "info"),
+            _line("Objects / Submeshes / Materials", f"{objects} / {submeshes} / {materials}", "info"),
+            _line("Material target", material_label, "info"),
+            _line("UV vertices / Texture candidates", f"{uv_count:,} / {tex_candidates}", "info"),
+            _line("Texture set", texture_set_label, "ok" if texture_set_label != "Custom" else "warn"),
+            _line("Base", base_name, "ok" if base_name != "-" else "bad"),
+            _line("Metal", metal_name, "ok" if metal_name != "-" else "bad"),
+            _line("Roughness", rough_name, "ok" if rough_name != "-" else "bad"),
+            _line("Normal", normal_name, "ok" if normal_name != "-" else "bad"),
+            _line("Normal space", self.gl_widget.normal_map_space, "info"),
+            _line(
+                "Alpha",
+                f"{self.gl_widget.alpha_render_mode} | base alpha: {'on' if self.gl_widget.use_base_alpha_in_blend else 'off'} | blend: {self.gl_widget.alpha_blend_opacity:.2f}",
+                "warn" if self.gl_widget.alpha_render_mode == "blend" else "info",
+            ),
+            _line(
+                "Projection / Shadows",
+                f"{projection} / {shadow_state}",
+                "ok" if shadow_state == "on" else ("warn" if shadow_state.startswith("off") else "bad"),
+            ),
         ]
         self.gl_widget.set_overlay_lines(lines)
 
