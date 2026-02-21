@@ -206,6 +206,14 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
 }
 
+vec3 srgbToLinear(vec3 c) {
+    return pow(clamp(c, 0.0, 1.0), vec3(2.2));
+}
+
+vec3 linearToSrgb(vec3 c) {
+    return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2));
+}
+
 float sampleChannel(vec4 texel, int channelIdx) {
     if (channelIdx == 1) {
         return texel.g;
@@ -268,7 +276,8 @@ vec3 computeDirectionalLight(vec3 N, vec3 V, vec3 albedo, float metallic, float 
 
 void main() {
     vec4 baseSample = (uHasBase == 1) ? texture2D(uBaseColorTex, vUv) : vec4(0.75, 0.75, 0.75, 1.0);
-    vec3 base = baseSample.rgb;
+    vec3 baseSrgb = baseSample.rgb;
+    vec3 base = srgbToLinear(baseSrgb);
     float alpha = 1.0;
     if (uAlphaMode == 1) {
         alpha = (uUseBaseAlpha == 1) ? baseSample.a : 1.0;
@@ -302,11 +311,12 @@ void main() {
     }
 
     if (uUnlitTexturePreview == 1 && uHasBase == 1) {
-        gl_FragColor = vec4(pow(base, vec3(1.0 / 2.2)), alpha);
+        // Base texture preview should match source texture color.
+        gl_FragColor = vec4(baseSrgb, alpha);
         return;
     }
     if (uFastMode == 1) {
-        gl_FragColor = vec4(pow(base, vec3(1.0 / 2.2)), alpha);
+        gl_FragColor = vec4(linearToSrgb(base), alpha);
         return;
     }
 
@@ -326,7 +336,7 @@ void main() {
 
     // Simple filmic tonemap + gamma
     color = color / (color + vec3(1.0));
-    color = pow(color, vec3(1.0 / 2.2));
+    color = linearToSrgb(color);
     gl_FragColor = vec4(color, alpha);
 }
 """
