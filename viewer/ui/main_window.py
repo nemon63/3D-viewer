@@ -36,6 +36,7 @@ from viewer.ui.theme import apply_ui_theme
 from viewer.controllers.batch_preview_controller import BatchPreviewController
 from viewer.controllers.catalog_index_controller import CatalogIndexController
 from viewer.controllers.catalog_controller import CatalogController
+from viewer.controllers.catalog_ui_controller import CatalogUiController
 from viewer.controllers.directory_scan_controller import DirectoryScanController
 from viewer.controllers.material_controller import MaterialController
 from viewer.controllers.model_session_controller import ModelSessionController
@@ -111,6 +112,7 @@ class MainWindow(QMainWindow):
         self._syncing_virtual_category = False
         self.main_toolbar = None
         self.catalog_controller = CatalogController()
+        self.catalog_ui_controller = CatalogUiController(self)
         self.virtual_catalog_controller = VirtualCatalogController()
         self.material_controller = MaterialController(self.material_channels)
         self.directory_scan_controller = DirectoryScanController(self)
@@ -2345,153 +2347,46 @@ class MainWindow(QMainWindow):
         self._start_index_scan(self.current_directory)
 
     def _on_filters_changed(self):
-        if self._syncing_filters_from_dock:
-            return
-        if self._settings_ready:
-            self.settings.setValue("view/search_text", self.search_input.text())
-            self.settings.setValue("view/only_favorites", self.only_favorites_checkbox.isChecked())
-            self.settings.setValue("view/category_filter", self.category_combo.currentText())
-            self.settings.setValue("view/only_uncategorized", bool(self.virtual_catalog_controller.only_uncategorized))
-        self._apply_model_filters(keep_selection=True)
-        self._sync_filters_to_dock()
+        self.catalog_ui_controller.on_filters_changed()
 
     def _on_dock_filters_changed(self, search_text: str, category_text: str, only_fav: bool):
-        self._syncing_filters_from_dock = True
-        try:
-            self.search_input.setText(search_text or "")
-            idx = self.category_combo.findText(category_text or "Все")
-            self.category_combo.setCurrentIndex(idx if idx >= 0 else 0)
-            self.only_favorites_checkbox.setChecked(bool(only_fav))
-        finally:
-            self._syncing_filters_from_dock = False
-        self._on_filters_changed()
+        self.catalog_ui_controller.on_dock_filters_changed(search_text, category_text, only_fav)
 
     def _refresh_virtual_categories_from_db(self):
-        self.virtual_catalog_controller.refresh_categories(db_path=self.catalog_db_path)
-        if self.catalog_panel is not None:
-            self._syncing_virtual_category = True
-            try:
-                self.catalog_panel.set_virtual_categories(
-                    self.virtual_catalog_controller.categories,
-                    selected_id=int(self.virtual_catalog_controller.selected_category_id or 0),
-                )
-                self.catalog_panel.set_virtual_filter_enabled(self.virtual_catalog_controller.filter_enabled)
-            finally:
-                self._syncing_virtual_category = False
+        self.catalog_ui_controller.refresh_virtual_categories_from_db()
 
     def _virtual_category_descendants(self, category_id: int):
-        return self.virtual_catalog_controller.descendants(category_id)
+        return self.catalog_ui_controller.virtual_category_descendants(category_id)
 
     def _refresh_asset_category_map(self):
-        self.virtual_catalog_controller.refresh_asset_map(self.model_files, db_path=self.catalog_db_path)
+        self.catalog_ui_controller.refresh_asset_category_map()
 
     def _on_virtual_category_filter_changed(self, category_id: int):
-        if self._syncing_virtual_category:
-            return
-        self.virtual_catalog_controller.set_selected_category(int(category_id or 0))
-        if self._settings_ready:
-            self.settings.setValue(
-                "view/virtual_category_id",
-                int(self.virtual_catalog_controller.selected_category_id),
-            )
-        self._apply_model_filters(keep_selection=True)
+        self.catalog_ui_controller.on_virtual_category_filter_changed(category_id)
 
     def _on_virtual_category_filter_mode_changed(self, enabled: bool):
-        self.virtual_catalog_controller.set_filter_enabled(bool(enabled))
-        if self._settings_ready:
-            self.settings.setValue(
-                "view/virtual_category_filter_enabled",
-                bool(self.virtual_catalog_controller.filter_enabled),
-            )
-        self._apply_model_filters(keep_selection=True)
+        self.catalog_ui_controller.on_virtual_category_filter_mode_changed(enabled)
 
     def _on_uncategorized_only_changed(self, enabled: bool):
-        self.virtual_catalog_controller.set_only_uncategorized(bool(enabled))
-        if self._settings_ready:
-            self.settings.setValue("view/only_uncategorized", bool(self.virtual_catalog_controller.only_uncategorized))
-        self._apply_model_filters(keep_selection=True)
+        self.catalog_ui_controller.on_uncategorized_only_changed(enabled)
 
     def _on_create_virtual_category_requested(self, parent_id: int, name: str):
-        try:
-            self.virtual_catalog_controller.create_category(parent_id=parent_id, name=name, db_path=self.catalog_db_path)
-        except Exception as exc:
-            self._set_status_text(f"Ошибка создания категории: {exc}")
-            return
-        self._refresh_virtual_categories_from_db()
-        self._refresh_catalog_events()
-        self._set_status_text(f"Категория создана: {name}")
+        self.catalog_ui_controller.on_create_virtual_category_requested(parent_id, name)
 
     def _on_rename_virtual_category_requested(self, category_id: int, name: str):
-        try:
-            self.virtual_catalog_controller.rename_category(category_id=category_id, name=name, db_path=self.catalog_db_path)
-        except Exception as exc:
-            self._set_status_text(f"Ошибка переименования: {exc}")
-            return
-        self._refresh_virtual_categories_from_db()
-        self._refresh_catalog_events()
-        self._set_status_text(f"Категория переименована: {name}")
+        self.catalog_ui_controller.on_rename_virtual_category_requested(category_id, name)
 
     def _on_delete_virtual_category_requested(self, category_id: int):
-        if int(category_id or 0) <= 0:
-            return
-        answer = QMessageBox.question(
-            self,
-            "Удалить категорию",
-            "Удалить категорию и все подкатегории? Назначения моделей будут очищены.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if answer != QMessageBox.Yes:
-            return
-        try:
-            self.virtual_catalog_controller.delete_category(category_id=category_id, db_path=self.catalog_db_path)
-        except Exception as exc:
-            self._set_status_text(f"Ошибка удаления: {exc}")
-            return
-        self._refresh_virtual_categories_from_db()
-        self._refresh_asset_category_map()
-        self._apply_model_filters(keep_selection=True)
-        self._refresh_catalog_events()
-        self._set_status_text("Категория удалена.")
+        self.catalog_ui_controller.on_delete_virtual_category_requested(category_id)
 
     def _on_assign_path_to_virtual_category(self, file_path: str, category_id: int):
-        if not file_path or int(category_id or 0) <= 0:
-            return
-        try:
-            ok = self.virtual_catalog_controller.assign_path(
-                file_path=file_path,
-                category_id=category_id,
-                db_path=self.catalog_db_path,
-            )
-        except Exception as exc:
-            self._set_status_text(f"Ошибка назначения категории: {exc}")
-            return
-        if not ok:
-            return
-        self._refresh_catalog_events()
-        self._apply_model_filters(keep_selection=True)
-        self._set_status_text(f"Категория назначена: {os.path.basename(file_path)}")
+        self.catalog_ui_controller.on_assign_path_to_virtual_category(file_path, category_id)
 
     def _on_assign_paths_to_virtual_category(self, file_paths, category_id: int):
-        cid = int(category_id or 0)
-        paths = [p for p in (file_paths or []) if p]
-        if cid <= 0 or not paths:
-            return
-        assigned = self.virtual_catalog_controller.assign_paths(paths, category_id=cid, db_path=self.catalog_db_path)
-        self._refresh_catalog_events()
-        self._apply_model_filters(keep_selection=True)
-        self._set_status_text(f"Назначено в категорию: {assigned} моделей")
+        self.catalog_ui_controller.on_assign_paths_to_virtual_category(file_paths, category_id)
 
     def _sync_filters_to_dock(self):
-        if self.catalog_panel is None:
-            return
-        self.catalog_panel.set_filter_state(
-            search_text=self.search_input.text(),
-            category_options=self._current_categories,
-            selected_category=self.category_combo.currentText(),
-            only_fav=self.only_favorites_checkbox.isChecked(),
-            only_uncategorized=self.virtual_catalog_controller.only_uncategorized,
-        )
+        self.catalog_ui_controller.sync_filters_to_dock()
 
     def _start_preview_batch(self):
         mode = self.catalog_panel.batch_mode() if self.catalog_panel is not None else "missing_all"
@@ -2529,37 +2424,7 @@ class MainWindow(QMainWindow):
         self.catalog_panel.set_batch_status(text, running=running, paused=paused)
 
     def _apply_model_filters(self, keep_selection=True):
-        prev_path = ""
-        if keep_selection:
-            prev_path = self._current_selected_path()
-        filtered = self.catalog_controller.filter_models(
-            model_files=self.model_files,
-            root_directory=self.current_directory,
-            search_text=self.search_input.text(),
-            selected_category=self.category_combo.currentData(),
-            only_favorites=self.only_favorites_checkbox.isChecked(),
-            favorite_paths=self.favorite_paths,
-        )
-        filtered = self.virtual_catalog_controller.apply_filters(filtered)
-        self.filtered_model_files = filtered
-        self._fill_model_list()
-
-        if keep_selection and prev_path:
-            try:
-                idx = self.filtered_model_files.index(prev_path)
-                self._select_model_by_index(idx)
-            except ValueError:
-                pass
-
-        if not self.filtered_model_files:
-            self.current_file_path = ""
-            self._refresh_validation_data()
-            self.favorite_toggle_button.setText("☆")
-            self._set_status_text("Нет моделей по текущему фильтру.")
-            self._append_index_status()
-        else:
-            if self._current_model_index() < 0:
-                self._select_model_by_index(0)
+        self.catalog_ui_controller.apply_model_filters(keep_selection=keep_selection)
 
     def _refresh_favorites_from_db(self):
         self.favorite_paths = self.catalog_controller.load_favorites(
