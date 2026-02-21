@@ -1,9 +1,8 @@
 import os
 import html
-from PyQt5.QtCore import QSettings, QSize, Qt, QTimer
+from PyQt5.QtCore import QSettings, QSize, Qt
 from PyQt5.QtGui import QBrush, QColor, QIcon, QPixmap
 from PyQt5.QtWidgets import (
-    QApplication,
     QCheckBox,
     QComboBox,
     QDockWidget,
@@ -38,6 +37,7 @@ from viewer.controllers.catalog_ui_controller import CatalogUiController
 from viewer.controllers.directory_scan_controller import DirectoryScanController
 from viewer.controllers.material_controller import MaterialController
 from viewer.controllers.model_session_controller import ModelSessionController
+from viewer.controllers.preview_ui_controller import PreviewUiController
 from viewer.controllers.virtual_catalog_controller import VirtualCatalogController
 from viewer.controllers.workspace_ui_controller import WorkspaceUiController
 from viewer.services.catalog_db import (
@@ -49,7 +49,7 @@ from viewer.services.pipeline_validation import (
     load_profiles_config,
     run_validation_checks,
 )
-from viewer.services.preview_cache import build_preview_path_for_model, get_preview_cache_dir, save_viewport_preview
+from viewer.services.preview_cache import get_preview_cache_dir
 from viewer.services.texture_sets import (
     build_texture_set_profiles,
     match_profile_key,
@@ -112,6 +112,7 @@ class MainWindow(QMainWindow):
         self.catalog_controller = CatalogController()
         self.catalog_log_controller = CatalogLogController(self)
         self.catalog_ui_controller = CatalogUiController(self)
+        self.preview_ui_controller = PreviewUiController(self)
         self.virtual_catalog_controller = VirtualCatalogController()
         self.workspace_ui_controller = WorkspaceUiController(self)
         self.material_controller = MaterialController(self.material_channels)
@@ -2195,55 +2196,13 @@ class MainWindow(QMainWindow):
         )
 
     def _on_model_loading_started(self, file_path: str):
-        self.model_list.setEnabled(False)
-        self.prev_button.setEnabled(False)
-        self.next_button.setEnabled(False)
-        self._set_status_text(f"Загрузка: {os.path.basename(file_path)} ...")
+        self.preview_ui_controller.on_model_loading_started(file_path)
 
     def _on_model_loaded(self, request_id: int, row: int, file_path: str, payload):
-        if request_id != self.model_session_controller.request_id:
-            return
-        loaded = self.gl_widget.apply_payload(payload)
-        self.model_list.setEnabled(True)
-        self.prev_button.setEnabled(True)
-        self.next_button.setEnabled(True)
-
-        if not loaded:
-            self._set_status_text(f"Ошибка: {self.gl_widget.last_error}")
-            if self.batch_controller.running:
-                self._advance_batch_after_item()
-            return
-
-        self.current_file_path = file_path
-        self._selected_model_path = file_path
-        self._restore_texture_overrides_for_file(file_path)
-        self._update_favorite_button_for_current()
-        self._populate_material_controls(self.gl_widget.last_texture_sets)
-        self._refresh_overlay_data(file_path)
-        self._refresh_validation_data(file_path)
-        self._update_status(row)
-        self.setWindowTitle(f"3D Viewer - {os.path.basename(file_path)}")
-        if file_path:
-            force = bool(self._force_preview_for_path) and os.path.normcase(os.path.normpath(self._force_preview_for_path)) == os.path.normcase(os.path.normpath(file_path))
-            if self.batch_controller.running and self.batch_controller.current_path:
-                force = True
-            if force:
-                self._force_preview_for_path = ""
-            QTimer.singleShot(180, lambda p=file_path, f=force: self._capture_model_preview(p, force=f))
-        if file_path.lower().endswith(".fbx"):
-            print("[FBX DEBUG]", self.gl_widget.last_debug_info or {})
-            print("[FBX DEBUG] selected_texture:", self.gl_widget.last_texture_path or "<none>")
+        self.preview_ui_controller.on_model_loaded(request_id, row, file_path, payload)
 
     def _on_model_load_failed(self, request_id: int, row: int, file_path: str, error_text: str):
-        if request_id != self.model_session_controller.request_id:
-            return
-        self.model_list.setEnabled(True)
-        self.prev_button.setEnabled(True)
-        self.next_button.setEnabled(True)
-        self._set_status_text(f"Ошибка загрузки: {error_text}")
-        self._refresh_validation_data()
-        if self.batch_controller.running:
-            self._advance_batch_after_item()
+        self.preview_ui_controller.on_model_load_failed(request_id, row, file_path, error_text)
 
     def _start_index_scan(self, directory: str, scanned_paths=None):
         if not directory:
@@ -2313,39 +2272,22 @@ class MainWindow(QMainWindow):
         self.catalog_ui_controller.sync_filters_to_dock()
 
     def _start_preview_batch(self):
-        mode = self.catalog_panel.batch_mode() if self.catalog_panel is not None else "missing_all"
-        self.batch_controller.start(
-            mode=mode,
-            model_files=self.model_files,
-            filtered_files=self.filtered_model_files,
-            current_directory=self.current_directory,
-            thumb_size=self._thumb_size,
-        )
+        self.preview_ui_controller.start_preview_batch()
 
     def _stop_preview_batch(self):
-        self.batch_controller.stop()
+        self.preview_ui_controller.stop_preview_batch()
 
     def _resume_preview_batch(self):
-        mode = self.catalog_panel.batch_mode() if self.catalog_panel is not None else self.batch_controller.mode
-        self.batch_controller.resume(
-            current_directory=self.current_directory,
-            thumb_size=self._thumb_size,
-            current_mode=mode,
-        )
+        self.preview_ui_controller.resume_preview_batch()
 
     def _advance_batch_after_item(self):
-        if not self.batch_controller.running:
-            return
-        QTimer.singleShot(10, self.batch_controller.on_item_processed)
+        self.preview_ui_controller.advance_batch_after_item()
 
     def _on_batch_mode_restored(self, mode: str):
-        if self.catalog_panel is not None:
-            self.catalog_panel.set_batch_mode(mode or "missing_all")
+        self.preview_ui_controller.on_batch_mode_restored(mode)
 
     def _on_batch_ui_state_changed(self, text: str, running: bool, paused: bool):
-        if self.catalog_panel is None:
-            return
-        self.catalog_panel.set_batch_status(text, running=running, paused=paused)
+        self.preview_ui_controller.on_batch_ui_state_changed(text, running, paused)
 
     def _apply_model_filters(self, keep_selection=True):
         self.catalog_ui_controller.apply_model_filters(keep_selection=keep_selection)
@@ -2377,108 +2319,19 @@ class MainWindow(QMainWindow):
         self.catalog_log_controller.append_index_status()
 
     def _capture_model_preview(self, file_path: str, force: bool = False):
-        if not file_path:
-            if self.batch_controller.running and self.batch_controller.current_path:
-                self._advance_batch_after_item()
-            return
-        should_advance_batch = (
-            self.batch_controller.running
-            and bool(self.batch_controller.current_path)
-            and os.path.normcase(os.path.normpath(self.batch_controller.current_path))
-            == os.path.normcase(os.path.normpath(file_path))
-        )
-        advanced = False
-        expected_path = build_preview_path_for_model(file_path, size=self._thumb_size)
-        if (not force) and os.path.isfile(expected_path):
-            norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
-            self._preview_icon_cache[norm] = expected_path
-            pix = QPixmap(expected_path)
-            icon = QIcon(pix.scaled(self._thumb_size, self._thumb_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            if not icon.isNull():
-                item = self._model_item_by_path.get(norm)
-                if item is not None:
-                    item.setIcon(0, icon)
-                if self.catalog_panel is not None:
-                    self.catalog_panel.set_item_icon(file_path, expected_path)
-            if should_advance_batch:
-                self._advance_batch_after_item()
-                advanced = True
-            return
-        try:
-            image = self.gl_widget.grabFramebuffer()
-        except Exception:
-            if should_advance_batch and not advanced:
-                self._advance_batch_after_item()
-            return
-        preview_path = save_viewport_preview(
-            model_path=file_path,
-            image=image,
-            db_path=self.catalog_db_path,
-            size=self._thumb_size,
-            force_rebuild=bool(force),
-        )
-        if not preview_path or not os.path.isfile(preview_path):
-            if should_advance_batch and not advanced:
-                self._advance_batch_after_item()
-            return
-        norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
-        self._preview_icon_cache[norm] = preview_path
-        pix = QPixmap(preview_path)
-        icon = QIcon(pix.scaled(self._thumb_size, self._thumb_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        if icon.isNull():
-            if should_advance_batch and not advanced:
-                self._advance_batch_after_item()
-            return
-        item = self._model_item_by_path.get(norm)
-        if item is not None:
-            item.setIcon(0, icon)
-        if self.catalog_panel is not None:
-            self.catalog_panel.set_item_icon(file_path, preview_path)
-        if should_advance_batch:
-            self._advance_batch_after_item()
-            advanced = True
+        self.preview_ui_controller.capture_model_preview(file_path, force=force)
 
     def _regenerate_preview_for_path(self, file_path: str):
-        if not file_path:
-            return
-        preview_path = build_preview_path_for_model(file_path, size=self._thumb_size)
-        try:
-            if os.path.isfile(preview_path):
-                os.remove(preview_path)
-        except OSError:
-            pass
-        norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
-        self._preview_icon_cache.pop(norm, None)
-        item = self._model_item_by_path.get(norm)
-        if item is not None:
-            item.setIcon(0, QIcon())
-        if self.catalog_panel is not None:
-            self.catalog_panel.clear_item_icon(file_path)
-        self._force_preview_for_path = file_path
-        self._open_model_by_path(file_path)
+        self.preview_ui_controller.regenerate_preview_for_path(file_path)
 
     def _open_folder_for_model_path(self, file_path: str):
-        directory = os.path.dirname(file_path)
-        if not directory or not os.path.isdir(directory):
-            return
-        try:
-            os.startfile(directory)
-        except Exception:
-            pass
+        self.preview_ui_controller.open_folder_for_model_path(file_path)
 
     def _copy_model_path(self, file_path: str):
-        if not file_path:
-            return
-        QApplication.clipboard().setText(file_path)
+        self.preview_ui_controller.copy_model_path(file_path)
 
     def _on_catalog_thumb_size_changed(self, size: int):
-        self._thumb_size = int(size)
-        if self._settings_ready:
-            self.settings.setValue("view/thumb_size", int(self._thumb_size))
-        self.model_list.setIconSize(QSize(self._thumb_size, self._thumb_size))
-        for item in self._model_item_by_path.values():
-            item.setSizeHint(0, QSize(0, self._thumb_size + 10))
-        self._refresh_catalog_dock_items()
+        self.preview_ui_controller.on_catalog_thumb_size_changed(size)
 
     def closeEvent(self, event):
         self._save_workspace_state()
