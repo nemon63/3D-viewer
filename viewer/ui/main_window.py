@@ -260,7 +260,19 @@ class MainWindow(QMainWindow):
             combo.addItem("Нет", "")
             combo.currentIndexChanged.connect(lambda _idx, ch=channel: self._on_material_channel_changed(ch))
             self.material_boxes[channel] = combo
-            material_channels_layout.addRow(title, combo)
+            channel_row = QHBoxLayout()
+            channel_row.addWidget(combo, stretch=1)
+            pick_button = QPushButton("...", self)
+            pick_button.setToolTip(f"Указать файл текстуры для канала: {title}")
+            pick_button.setFixedWidth(32)
+            pick_button.clicked.connect(lambda _checked=False, ch=channel: self._assign_texture_file_to_channel(ch))
+            channel_row.addWidget(pick_button)
+            clear_button = QPushButton("x", self)
+            clear_button.setToolTip(f"Очистить текстуру канала: {title}")
+            clear_button.setFixedWidth(28)
+            clear_button.clicked.connect(lambda _checked=False, ch=channel: self._clear_channel_texture(ch))
+            channel_row.addWidget(clear_button)
+            material_channels_layout.addRow(title, channel_row)
         self.preview_channel_combo = QComboBox(self)
         for channel, title in self.material_channels:
             self.preview_channel_combo.addItem(title, channel)
@@ -1684,6 +1696,63 @@ class MainWindow(QMainWindow):
             self._sync_texture_set_selection_from_current_channels()
             self._refresh_overlay_data()
             self._refresh_validation_data()
+
+    def _assign_texture_file_to_channel(self, channel=None):
+        if channel is None:
+            channel = self.preview_channel_combo.currentData() if self.preview_channel_combo is not None else ""
+        if not channel:
+            self._set_status_text("Канал не выбран.")
+            return
+
+        current_path = self.current_file_path or self._current_selected_path() or ""
+        base_dir = os.path.dirname(current_path) if current_path else (self.current_directory or os.getcwd())
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите текстуру",
+            base_dir,
+            "Images (*.png *.jpg *.jpeg *.tga *.bmp *.tif *.tiff);;All files (*.*)",
+        )
+        if not file_path:
+            return
+
+        material_uid = self._selected_material_uid()
+        applied = self.gl_widget.apply_texture_path(channel, file_path, material_uid=material_uid)
+        if applied:
+            self._persist_texture_overrides_for_current()
+
+        combo = self.material_boxes.get(channel)
+        if combo is not None:
+            combo.blockSignals(True)
+            idx = combo.findData(file_path)
+            if idx < 0:
+                combo.addItem(os.path.basename(file_path), file_path)
+                idx = combo.findData(file_path)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            combo.blockSignals(False)
+
+        self._set_status_text(f"Назначено в {channel}: {os.path.basename(file_path)}")
+        self._update_status(self._current_model_index())
+        self._sync_texture_set_selection_from_current_channels()
+        self._refresh_overlay_data()
+        self._refresh_validation_data()
+
+    def _clear_channel_texture(self, channel):
+        if not channel:
+            return
+        material_uid = self._selected_material_uid()
+        if self.gl_widget.apply_texture_path(channel, "", material_uid=material_uid):
+            self._persist_texture_overrides_for_current()
+        combo = self.material_boxes.get(channel)
+        if combo is not None:
+            combo.blockSignals(True)
+            idx = combo.findData("")
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            combo.blockSignals(False)
+        self._set_status_text(f"Канал очищен: {channel}")
+        self._update_status(self._current_model_index())
+        self._sync_texture_set_selection_from_current_channels()
+        self._refresh_overlay_data()
+        self._refresh_validation_data()
 
     def _apply_channel_texture(self, channel):
         if self._syncing_texture_set_ui:

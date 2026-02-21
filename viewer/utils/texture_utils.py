@@ -4,6 +4,7 @@ import re
 
 TEXTURE_EXTS = (".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff")
 _DIR_SCAN_CACHE = {}
+_SCAN_CACHE_VERSION = "v6"
 _MAX_TEXTURE_SCAN_FILES = 20000
 _MAX_TEXTURE_SCAN_DEPTH = 4
 
@@ -112,15 +113,25 @@ def find_texture_candidates(model_path):
     model_dir = os.path.dirname(model_path)
     model_name = os.path.splitext(os.path.basename(model_path))[0].lower()
     candidates = _get_cached_texture_files(model_dir)
+    if not candidates:
+        candidates = _find_named_textures(model_dir, model_name)
+    if not candidates:
+        candidates = _find_textures_by_stem(model_dir, model_name)
+    if not candidates:
+        candidates = _scan_texture_files_recursive_shallow(model_dir, max_depth=2, max_files=50000)
     return rank_texture_candidates(candidates, model_name=model_name)
 
 
 def _get_cached_texture_files(model_dir):
-    norm_model_dir = os.path.normcase(os.path.normpath(model_dir))
+    norm_model_dir = os.path.normcase(os.path.normpath(model_dir)) + "|" + _SCAN_CACHE_VERSION
     if norm_model_dir in _DIR_SCAN_CACHE:
         return list(_DIR_SCAN_CACHE[norm_model_dir])
 
-    search_dirs = [model_dir, os.path.join(model_dir, "Textures")]
+    search_dirs = [
+        model_dir,
+        os.path.join(model_dir, "Textures"),
+        os.path.join(model_dir, "textures"),
+    ]
     candidates = []
     for directory in search_dirs:
         if not os.path.isdir(directory):
@@ -138,6 +149,75 @@ def _get_cached_texture_files(model_dir):
 
     _DIR_SCAN_CACHE[norm_model_dir] = list(candidates)
     return candidates
+
+
+def _find_named_textures(model_dir: str, model_name: str):
+    if not model_dir or not model_name:
+        return []
+    names = []
+    for ext in TEXTURE_EXTS:
+        names.append(f"{model_name}{ext}")
+        names.append(f"{model_name}{ext.upper()}")
+
+    search_dirs = [
+        model_dir,
+        os.path.join(model_dir, "Textures"),
+        os.path.join(model_dir, "textures"),
+    ]
+    parent = os.path.dirname(model_dir)
+    if parent and parent != model_dir:
+        search_dirs.append(os.path.join(parent, "Textures"))
+        search_dirs.append(os.path.join(parent, "textures"))
+
+    matches = []
+    seen = set()
+    for directory in search_dirs:
+        if not directory or not os.path.isdir(directory):
+            continue
+        for name in names:
+            path = os.path.join(directory, name)
+            norm = os.path.normcase(os.path.normpath(path))
+            if norm in seen:
+                continue
+            if os.path.isfile(path):
+                seen.add(norm)
+                matches.append(path)
+    return matches
+
+
+def _find_textures_by_stem(model_dir: str, model_name: str):
+    if not model_dir or not model_name:
+        return []
+    aliases = [model_name]
+    stripped = re.sub(r"\d+$", "", model_name)
+    if stripped and stripped != model_name:
+        aliases.append(stripped)
+    search_dirs = [
+        model_dir,
+        os.path.join(model_dir, "Textures"),
+        os.path.join(model_dir, "textures"),
+    ]
+    parent = os.path.dirname(model_dir)
+    if parent and parent != model_dir:
+        search_dirs.append(os.path.join(parent, "Textures"))
+        search_dirs.append(os.path.join(parent, "textures"))
+
+    matches = []
+    seen = set()
+    for directory in search_dirs:
+        if not directory or not os.path.isdir(directory):
+            continue
+        for path in _scan_texture_files_non_recursive(directory):
+            stem = os.path.splitext(os.path.basename(path))[0].lower()
+            for alias in aliases:
+                if stem == alias or stem.startswith(f"{alias}_") or stem.startswith(f"{alias}-"):
+                    norm = os.path.normcase(os.path.normpath(path))
+                    if norm in seen:
+                        continue
+                    seen.add(norm)
+                    matches.append(path)
+                    break
+    return matches
 
 
 def _scan_texture_files_non_recursive(directory: str):
@@ -166,6 +246,26 @@ def _scan_texture_files_recursive_limited(directory: str):
         for name in names:
             scanned_files += 1
             if scanned_files > _MAX_TEXTURE_SCAN_FILES:
+                return out
+            lower = name.lower()
+            if lower.endswith(TEXTURE_EXTS):
+                out.append(os.path.join(root, name))
+    return out
+
+
+def _scan_texture_files_recursive_shallow(directory: str, max_depth: int = 2, max_files: int = 50000):
+    out = []
+    if not directory or not os.path.isdir(directory):
+        return out
+    base_depth = directory.rstrip("\\/").count(os.sep)
+    scanned_files = 0
+    for root, _, names in os.walk(directory):
+        depth = root.rstrip("\\/").count(os.sep) - base_depth
+        if depth > max_depth:
+            continue
+        for name in names:
+            scanned_files += 1
+            if scanned_files > max_files:
                 return out
             lower = name.lower()
             if lower.endswith(TEXTURE_EXTS):

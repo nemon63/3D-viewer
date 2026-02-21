@@ -32,7 +32,7 @@ except ImportError:
     fbx = None
 
 
-_PAYLOAD_CACHE_VERSION = "v6"
+_PAYLOAD_CACHE_VERSION = "v9"
 _PAYLOAD_CACHE_DIR = os.path.join(".cache", "payload_cache")
 _SMOOTH_FALLBACK_MAX_POLYGONS = 250000
 
@@ -160,7 +160,7 @@ def _load_trimesh_payload(
 
         loader_name = "trimesh_scene_single" if len(meshes) == 1 else "trimesh_scene_multi"
         combined_vertices, combined_indices, combined_normals, combined_texcoords = _combine_scene_meshes(meshes)
-        vertices, indices, normals, normal_meta = process_mesh_data(
+        vertices, indices, normals, texcoords, normal_meta = process_mesh_data(
             combined_vertices,
             combined_indices,
             combined_normals,
@@ -169,14 +169,20 @@ def _load_trimesh_payload(
             hard_angle_deg=hard_angle_deg,
             fast_mode=fast_mode,
             return_meta=True,
+            texcoords=combined_texcoords,
+            return_texcoords=True,
         )
-        texcoords = np.array(combined_texcoords, dtype=np.float32)
         if texcoords.ndim != 2 or texcoords.shape[1] != 2 or texcoords.shape[0] != vertices.shape[0]:
             texcoords = np.array([], dtype=np.float32)
 
         model_hint = os.path.splitext(os.path.basename(file_path))[0]
         texture_candidates = find_texture_candidates(file_path)
         texture_sets = group_texture_candidates(texture_candidates)
+        if not texture_sets.get(CHANNEL_BASECOLOR):
+            model_stem = os.path.splitext(os.path.basename(file_path))[0].lower()
+            exact_base = _force_basecolor_match(texture_candidates, model_stem)
+            if exact_base:
+                texture_sets[CHANNEL_BASECOLOR] = exact_base
         return MeshPayload(
             vertices=vertices,
             indices=indices,
@@ -201,7 +207,8 @@ def _load_trimesh_payload(
             },
         )
 
-    vertices, indices, normals, normal_meta = process_mesh_data(
+    texcoords = _extract_trimesh_uv(scene_or_mesh)
+    vertices, indices, normals, texcoords, normal_meta = process_mesh_data(
         scene_or_mesh.vertices,
         scene_or_mesh.faces,
         [],
@@ -210,11 +217,17 @@ def _load_trimesh_payload(
         hard_angle_deg=hard_angle_deg,
         fast_mode=fast_mode,
         return_meta=True,
+        texcoords=texcoords,
+        return_texcoords=True,
     )
-    texcoords = _extract_trimesh_uv(scene_or_mesh)
     model_hint = os.path.splitext(os.path.basename(file_path))[0]
     texture_candidates = find_texture_candidates(file_path)
     texture_sets = group_texture_candidates(texture_candidates)
+    if not texture_sets.get(CHANNEL_BASECOLOR):
+        model_stem = os.path.splitext(os.path.basename(file_path))[0].lower()
+        exact_base = _force_basecolor_match(texture_candidates, model_stem)
+        if exact_base:
+            texture_sets[CHANNEL_BASECOLOR] = exact_base
     return MeshPayload(
         vertices=vertices,
         indices=indices,
@@ -330,6 +343,22 @@ def _select_texture_paths(texture_sets: dict, hint_names=None):
             "roughness": int(rough_swizzle),
         },
     }
+
+
+def _force_basecolor_match(texture_candidates, model_stem):
+    if not texture_candidates or not model_stem:
+        return []
+    target = str(model_stem).strip().lower()
+    if not target:
+        return []
+    target_strict, target_loose = _normalized_match_keys(target)
+    exact = []
+    for path in texture_candidates:
+        stem = _stem_family_key(path)
+        stem_strict, stem_loose = _normalized_match_keys(stem)
+        if stem == target or (target_loose and stem_loose == target_loose) or (target_strict and stem_strict == target_strict):
+            exact.append(path)
+    return exact
 
 
 def _merge_texture_paths(primary_paths: dict, fallback_sets: dict, hint_names=None, fill_missing_channels=None):
@@ -486,13 +515,38 @@ def _extract_hint_tokens(hint_names=None):
     return out
 
 
+def _normalized_match_keys(value: str):
+    text = str(value or "").strip().lower()
+    if not text:
+        return "", ""
+    strict = re.sub(r"[^a-z0-9]+", "", text)
+    parts = re.findall(r"[a-z]+|\d+", strict)
+    if not parts:
+        return strict, strict
+    loose_parts = []
+    for part in parts:
+        if part.isdigit():
+            # axe_02, axe02, axe2 -> same loose key
+            loose_parts.append(str(int(part)))
+        else:
+            loose_parts.append(part)
+    loose = "".join(loose_parts)
+    return strict, loose
+
+
 def _texture_match_score(path: str, hint_tokens):
     if not hint_tokens:
         return 0
     stem = os.path.splitext(os.path.basename(path))[0].lower()
     wrapped = f"_{stem}_"
+    stem_strict, stem_loose = _normalized_match_keys(stem)
     score = 0
     for hint in hint_tokens:
+        hint_strict, hint_loose = _normalized_match_keys(hint)
+        if hint_loose and stem_loose == hint_loose:
+            score += 260
+        elif hint_strict and stem_strict == hint_strict:
+            score += 220
         if stem == hint:
             score += 220
         elif stem.startswith(f"{hint}_") or stem.startswith(f"{hint}-"):
@@ -501,6 +555,8 @@ def _texture_match_score(path: str, hint_tokens):
             score += 90
         elif hint in stem:
             score += 40
+        elif hint_loose and hint_loose in stem_loose:
+            score += 70
     return score
 
 
@@ -573,7 +629,7 @@ def _load_fbx_payload(
             allow_smooth_fallback=allow_smooth_fallback,
         )
         t_parse_done = time.perf_counter()
-        vertices, indices, normals, normal_meta = process_mesh_data(
+        vertices, indices, normals, texcoords, normal_meta = process_mesh_data(
             vertices_raw,
             indices_raw,
             normals_raw,
@@ -582,12 +638,18 @@ def _load_fbx_payload(
             hard_angle_deg=hard_angle_deg,
             fast_mode=fast_mode,
             return_meta=True,
+            texcoords=texcoords_raw,
+            return_texcoords=True,
         )
         t_process_done = time.perf_counter()
-
-        texcoords = np.array(texcoords_raw, dtype=np.float32)
-        if texcoords.ndim != 2 or texcoords.shape[1] != 2:
+        if texcoords.ndim != 2 or texcoords.shape[1] != 2 or texcoords.shape[0] != vertices.shape[0]:
             texcoords = np.array([], dtype=np.float32)
+
+        index_remap = normal_meta.get("index_remap")
+        if index_remap is not None:
+            for group in submesh_groups.values():
+                if group["indices"]:
+                    group["indices"] = [int(index_remap[int(i)]) for i in group["indices"]]
 
         submeshes = []
         texture_candidates = []
@@ -624,7 +686,9 @@ def _load_fbx_payload(
         texture_candidates = rank_texture_candidates(texture_candidates, model_name=os.path.splitext(os.path.basename(file_path))[0].lower())
         texture_sets = group_texture_candidates(texture_candidates)
         if not texture_sets.get(CHANNEL_BASECOLOR):
-            texture_sets[CHANNEL_BASECOLOR] = texture_candidates[:1]
+            model_stem = os.path.splitext(os.path.basename(file_path))[0].lower()
+            exact_base = _force_basecolor_match(texture_candidates, model_stem)
+            texture_sets[CHANNEL_BASECOLOR] = exact_base or texture_candidates[:1]
 
         if submeshes:
             model_hint = os.path.splitext(os.path.basename(file_path))[0]

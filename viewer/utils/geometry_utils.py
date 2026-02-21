@@ -55,6 +55,59 @@ def _compute_hard_normals(vertices, indices):
     return normals
 
 
+def _merge_vertices_by_position_uv(vertices, indices, texcoords=None, decimals=6):
+    vertices = np.array(vertices, dtype=np.float32)
+    indices = np.array(indices, dtype=np.uint32).reshape(-1)
+    texcoords_arr = None
+    if texcoords is not None:
+        texcoords_arr = np.array(texcoords, dtype=np.float32)
+        if texcoords_arr.ndim != 2 or texcoords_arr.shape[0] != vertices.shape[0] or texcoords_arr.shape[1] < 2:
+            texcoords_arr = None
+
+    if vertices.size == 0 or indices.size == 0:
+        return vertices, indices, texcoords_arr, np.arange(vertices.shape[0], dtype=np.uint32)
+
+    scale = 10.0 ** int(decimals)
+    pos_key = np.round(vertices * scale).astype(np.int64)
+    if texcoords_arr is not None:
+        uv_key = np.round(texcoords_arr[:, :2] * scale).astype(np.int64)
+    else:
+        uv_key = None
+
+    remap = np.zeros((vertices.shape[0],), dtype=np.uint32)
+    new_vertices = []
+    new_texcoords = []
+    key_to_new = {}
+    for idx in range(vertices.shape[0]):
+        if uv_key is not None:
+            key = (
+                int(pos_key[idx, 0]),
+                int(pos_key[idx, 1]),
+                int(pos_key[idx, 2]),
+                int(uv_key[idx, 0]),
+                int(uv_key[idx, 1]),
+            )
+        else:
+            key = (int(pos_key[idx, 0]), int(pos_key[idx, 1]), int(pos_key[idx, 2]))
+
+        new_index = key_to_new.get(key)
+        if new_index is None:
+            new_index = len(new_vertices)
+            key_to_new[key] = new_index
+            new_vertices.append(vertices[idx])
+            if texcoords_arr is not None:
+                new_texcoords.append(texcoords_arr[idx, :2])
+        remap[idx] = new_index
+
+    new_vertices = np.array(new_vertices, dtype=np.float32)
+    new_indices = remap[indices]
+    if texcoords_arr is not None:
+        new_texcoords = np.array(new_texcoords, dtype=np.float32)
+    else:
+        new_texcoords = np.array([], dtype=np.float32)
+    return new_vertices, new_indices, new_texcoords, remap
+
+
 def process_mesh_data(
     vertices,
     indices,
@@ -64,10 +117,17 @@ def process_mesh_data(
     hard_angle_deg=60.0,
     fast_mode=False,
     return_meta=False,
+    texcoords=None,
+    return_texcoords=False,
 ):
     vertices = np.array(vertices, dtype=np.float32)
     indices = np.array(indices, dtype=np.uint32).reshape(-1)
     normals = np.array(normals, dtype=np.float32)
+    texcoords_arr = None
+    if texcoords is not None:
+        texcoords_arr = np.array(texcoords, dtype=np.float32)
+        if texcoords_arr.ndim != 2 or texcoords_arr.shape[0] != vertices.shape[0] or texcoords_arr.shape[1] < 2:
+            texcoords_arr = None
 
     if vertices.size == 0 or indices.size == 0:
         result = (
@@ -76,8 +136,13 @@ def process_mesh_data(
             np.array([], dtype=np.float32),
         )
         if return_meta:
-            return result[0], result[1], result[2], {"normals_source": "empty", "normals_policy": str(normals_policy)}
-        return result
+            meta = {"normals_source": "empty", "normals_policy": str(normals_policy)}
+            if return_texcoords:
+                return result[0], result[1], result[2], np.array([], dtype=np.float32), meta
+            return result[0], result[1], result[2], meta
+        if return_texcoords:
+            return result[0], result[1], result[2], np.array([], dtype=np.float32)
+        return result[0], result[1], result[2]
 
     if indices.size % 3 != 0:
         raise RuntimeError("Invalid index buffer: expected triangles.")
@@ -90,7 +155,7 @@ def process_mesh_data(
         NORMALS_POLICY_RECOMPUTE_HARD,
     }:
         policy = NORMALS_POLICY_AUTO
-    _ = float(hard_angle_deg or 0.0)  # reserved for future angle-based split
+    _ = float(hard_angle_deg or 0.0)
 
     has_import_normals = normals.ndim == 2 and normals.shape[0] == vertices.shape[0] and normals.shape[1] >= 3
     if has_import_normals:
@@ -98,6 +163,23 @@ def process_mesh_data(
         normals, has_import_normals = _normalize_normals(normals)
 
     normals_source = "unknown"
+    index_remap = None
+    should_merge = False
+    if policy == NORMALS_POLICY_RECOMPUTE_SMOOTH and not fast_mode:
+        should_merge = True
+    elif policy == NORMALS_POLICY_AUTO and (not has_import_normals) and (not fast_mode):
+        should_merge = True
+    if should_merge:
+        merged_vertices, merged_indices, merged_texcoords, remap = _merge_vertices_by_position_uv(
+            vertices,
+            indices,
+            texcoords_arr,
+        )
+        if merged_vertices.shape[0] < vertices.shape[0]:
+            vertices = merged_vertices
+            indices = merged_indices
+            texcoords_arr = merged_texcoords if merged_texcoords.size > 0 else texcoords_arr
+            index_remap = remap
     if policy == NORMALS_POLICY_IMPORT:
         if has_import_normals:
             normals_source = "import"
@@ -132,5 +214,15 @@ def process_mesh_data(
         vertices /= max_extent
 
     if return_meta:
-        return vertices, indices, normals, {"normals_source": normals_source, "normals_policy": policy}
+        meta = {"normals_source": normals_source, "normals_policy": policy}
+        if index_remap is not None:
+            meta["index_remap"] = index_remap
+            meta["index_remap_applied"] = True
+            meta["index_remap_before"] = int(index_remap.shape[0])
+            meta["index_remap_after"] = int(vertices.shape[0])
+        if return_texcoords:
+            return vertices, indices, normals, (texcoords_arr if texcoords_arr is not None else np.array([], dtype=np.float32)), meta
+        return vertices, indices, normals, meta
+    if return_texcoords:
+        return vertices, indices, normals, (texcoords_arr if texcoords_arr is not None else np.array([], dtype=np.float32))
     return vertices, indices, normals
