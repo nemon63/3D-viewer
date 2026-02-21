@@ -968,6 +968,9 @@ class MainWindow(QMainWindow):
         if shadow_quality_idx >= 0:
             self.shadow_quality_combo.setCurrentIndex(shadow_quality_idx)
         self.shadows_checkbox.setChecked(bool(shadows))
+        # Force synchronization even when checkbox value didn't change
+        # (stateChanged signal is not emitted in that case).
+        self._on_shadows_toggled(self.shadows_checkbox.checkState())
         self.search_input.setText(search_text)
         self.only_favorites_checkbox.setChecked(bool(only_fav))
         self._pending_category_filter = category_name or "Все"
@@ -1855,15 +1858,22 @@ class MainWindow(QMainWindow):
     def _on_shadows_toggled(self, state: int):
         enabled = state == Qt.Checked
         active = self.gl_widget.set_shadows_enabled(enabled)
+        status = str(self.gl_widget.shadow_status_message or "").strip().lower()
         if enabled and not active:
-            self.shadows_checkbox.blockSignals(True)
-            self.shadows_checkbox.setChecked(False)
-            self.shadows_checkbox.blockSignals(False)
-            if self._settings_ready:
-                self.settings.setValue("view/shadows_enabled", False)
+            # During startup GL context may be unavailable yet.
+            # Keep checkbox checked and let OpenGLWidget enable shadows once context is ready.
+            if status == "no context":
+                if self._settings_ready:
+                    self.settings.setValue("view/shadows_enabled", True)
+            else:
+                self.shadows_checkbox.blockSignals(True)
+                self.shadows_checkbox.setChecked(False)
+                self.shadows_checkbox.blockSignals(False)
+                if self._settings_ready:
+                    self.settings.setValue("view/shadows_enabled", False)
         else:
             if self._settings_ready:
-                self.settings.setValue("view/shadows_enabled", bool(active))
+                self.settings.setValue("view/shadows_enabled", bool(enabled))
         self._update_status(self._current_model_index())
 
     def _sync_projection_combo(self):
@@ -2282,6 +2292,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._save_workspace_state()
+        try:
+            self.settings.setValue("view/shadows_enabled", bool(self.shadows_checkbox.isChecked()))
+        except Exception:
+            pass
         super().closeEvent(event)
 
     def _show_catalog_dock(self):
