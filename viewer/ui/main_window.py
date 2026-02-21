@@ -42,7 +42,7 @@ from viewer.controllers.model_session_controller import ModelSessionController
 from viewer.services.catalog_db import (
     create_category,
     delete_category,
-    get_asset_category_map,
+    get_asset_categories_map,
     get_categories_tree,
     get_preview_paths_for_assets,
     get_recent_events,
@@ -117,6 +117,8 @@ class MainWindow(QMainWindow):
         self._virtual_categories = []
         self._virtual_children_by_parent = {}
         self._selected_virtual_category_id = 0
+        self._virtual_category_filter_enabled = False
+        self._only_uncategorized = False
         self._asset_category_map = {}
         self.main_toolbar = None
         self.catalog_controller = CatalogController()
@@ -697,15 +699,18 @@ class MainWindow(QMainWindow):
         panel.nextRequested.connect(self.show_next_model)
         panel.toggleFavoriteRequested.connect(self._toggle_current_favorite)
         panel.filtersChanged.connect(self._on_dock_filters_changed)
+        panel.uncategorizedOnlyChanged.connect(self._on_uncategorized_only_changed)
         panel.thumbSizeChanged.connect(self._on_catalog_thumb_size_changed)
         panel.batchStartRequested.connect(self._start_preview_batch)
         panel.batchStopRequested.connect(self._stop_preview_batch)
         panel.batchResumeRequested.connect(self._resume_preview_batch)
         panel.virtualCategoryFilterChanged.connect(self._on_virtual_category_filter_changed)
+        panel.virtualCategoryFilterModeChanged.connect(self._on_virtual_category_filter_mode_changed)
         panel.createCategoryRequested.connect(self._on_create_virtual_category_requested)
         panel.renameCategoryRequested.connect(self._on_rename_virtual_category_requested)
         panel.deleteCategoryRequested.connect(self._on_delete_virtual_category_requested)
         panel.assignPathToCategoryRequested.connect(self._on_assign_path_to_virtual_category)
+        panel.assignPathsToCategoryRequested.connect(self._on_assign_paths_to_virtual_category)
         dock.setWidget(panel)
         self.addDockWidget(Qt.LeftDockWidgetArea, dock)
         dock.setFloating(False)
@@ -713,6 +718,7 @@ class MainWindow(QMainWindow):
         self.catalog_dock = dock
         self.catalog_panel = panel
         self._refresh_virtual_categories_from_db()
+        self.catalog_panel.set_virtual_filter_enabled(self._virtual_category_filter_enabled)
         self._on_batch_ui_state_changed("Batch: idle", self.batch_controller.running, self.batch_controller.paused)
 
     def _init_settings_dock(self):
@@ -1056,6 +1062,8 @@ class MainWindow(QMainWindow):
         only_fav = self.settings.value("view/only_favorites", False, type=bool)
         category_name = self.settings.value("view/category_filter", "Все", type=str)
         virtual_category_id = self.settings.value("view/virtual_category_id", 0, type=int)
+        virtual_category_filter = self.settings.value("view/virtual_category_filter_enabled", False, type=bool)
+        only_uncategorized = self.settings.value("view/only_uncategorized", False, type=bool)
 
         self.rotate_speed_slider.setValue(max(self.rotate_speed_slider.minimum(), min(self.rotate_speed_slider.maximum(), rotate_speed)))
         self.zoom_speed_slider.setValue(max(self.zoom_speed_slider.minimum(), min(self.zoom_speed_slider.maximum(), zoom_speed)))
@@ -1115,10 +1123,13 @@ class MainWindow(QMainWindow):
         self.only_favorites_checkbox.setChecked(bool(only_fav))
         self._pending_category_filter = category_name or "Все"
         self._selected_virtual_category_id = int(virtual_category_id or 0)
+        self._virtual_category_filter_enabled = bool(virtual_category_filter)
+        self._only_uncategorized = bool(only_uncategorized)
         if self.catalog_panel is not None:
             self._syncing_virtual_category = True
             try:
                 self.catalog_panel.set_selected_virtual_category(self._selected_virtual_category_id)
+                self.catalog_panel.set_virtual_filter_enabled(self._virtual_category_filter_enabled)
             finally:
                 self._syncing_virtual_category = False
         self._on_catalog_thumb_size_changed(
@@ -1334,6 +1345,7 @@ class MainWindow(QMainWindow):
             favorite_paths=self.favorite_paths,
             preview_map_raw=preview_map_raw,
             preview_root=preview_root,
+            asset_categories_map=self._asset_category_map,
         )
         self.catalog_panel.set_items(items, preview_map)
 
@@ -1854,10 +1866,15 @@ class MainWindow(QMainWindow):
         face_fb = int(debug.get("fbx_face_fallback_normals", 0) or 0)
         shadow_state = str(self.gl_widget.shadow_status_message or "off")
         projection = "ortho" if self.gl_widget.projection_mode == "orthographic" else "perspective"
+        category_count = 0
+        if active_path:
+            norm_active = os.path.normcase(os.path.normpath(os.path.abspath(active_path)))
+            category_count = len(self._asset_category_map.get(norm_active) or set())
         lines = [
             _line("Model", os.path.basename(active_path) if active_path else "-", "info"),
             _line("Vertices / Triangles", f"{vertices:,} / {triangles:,}", "info"),
             _line("Objects / Submeshes / Materials", f"{objects} / {submeshes} / {materials}", "info"),
+            _line("Catalog categories", str(category_count), "ok" if category_count > 0 else "warn"),
             _line("Material target", material_label, "info"),
             _line("UV vertices / Texture candidates", f"{uv_count:,} / {tex_candidates}", "info"),
             _line("Texture set", texture_set_label, "ok" if texture_set_label != "Custom" else "warn"),
@@ -1902,9 +1919,13 @@ class MainWindow(QMainWindow):
         preview = "unlit" if self.gl_widget.unlit_texture_preview else "lit"
         projection = "ortho" if self.gl_widget.projection_mode == "orthographic" else "persp"
         shadow_state = self.gl_widget.shadow_status_message
+        norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
+        category_count = len(self._asset_category_map.get(norm) or set())
+        category_state = f"cat:{category_count}" if category_count > 0 else "cat:new"
         self._set_status_text(
             f"Открыт: {os.path.basename(file_path)} ({row + 1}/{len(self.filtered_model_files)}) | "
-            f"UV: {uv_count} | Текстур-кандидатов: {tex_count} | Текстура: {tex_file} | {preview} | {projection} | shadows:{shadow_state}"
+            f"UV: {uv_count} | Текстур-кандидатов: {tex_count} | Текстура: {tex_file} | "
+            f"{preview} | {projection} | shadows:{shadow_state} | {category_state}"
         )
         self._refresh_overlay_data(file_path)
         self._append_index_status()
@@ -2340,6 +2361,7 @@ class MainWindow(QMainWindow):
             self.settings.setValue("view/search_text", self.search_input.text())
             self.settings.setValue("view/only_favorites", self.only_favorites_checkbox.isChecked())
             self.settings.setValue("view/category_filter", self.category_combo.currentText())
+            self.settings.setValue("view/only_uncategorized", bool(self._only_uncategorized))
         self._apply_model_filters(keep_selection=True)
         self._sync_filters_to_dock()
 
@@ -2373,6 +2395,7 @@ class MainWindow(QMainWindow):
                     self._virtual_categories,
                     selected_id=int(self._selected_virtual_category_id or 0),
                 )
+                self.catalog_panel.set_virtual_filter_enabled(self._virtual_category_filter_enabled)
             finally:
                 self._syncing_virtual_category = False
 
@@ -2391,7 +2414,7 @@ class MainWindow(QMainWindow):
         return out
 
     def _refresh_asset_category_map(self):
-        self._asset_category_map = get_asset_category_map(self.model_files, db_path=self.catalog_db_path)
+        self._asset_category_map = get_asset_categories_map(self.model_files, db_path=self.catalog_db_path)
 
     def _on_virtual_category_filter_changed(self, category_id: int):
         if self._syncing_virtual_category:
@@ -2399,6 +2422,18 @@ class MainWindow(QMainWindow):
         self._selected_virtual_category_id = int(category_id or 0)
         if self._settings_ready:
             self.settings.setValue("view/virtual_category_id", int(self._selected_virtual_category_id))
+        self._apply_model_filters(keep_selection=True)
+
+    def _on_virtual_category_filter_mode_changed(self, enabled: bool):
+        self._virtual_category_filter_enabled = bool(enabled)
+        if self._settings_ready:
+            self.settings.setValue("view/virtual_category_filter_enabled", bool(self._virtual_category_filter_enabled))
+        self._apply_model_filters(keep_selection=True)
+
+    def _on_uncategorized_only_changed(self, enabled: bool):
+        self._only_uncategorized = bool(enabled)
+        if self._settings_ready:
+            self.settings.setValue("view/only_uncategorized", bool(self._only_uncategorized))
         self._apply_model_filters(keep_selection=True)
 
     def _on_create_virtual_category_requested(self, parent_id: int, name: str):
@@ -2454,10 +2489,37 @@ class MainWindow(QMainWindow):
             self._set_status_text(f"Ошибка назначения категории: {exc}")
             return
         norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
-        self._asset_category_map[norm] = int(category_id)
+        bucket = self._asset_category_map.setdefault(norm, set())
+        if not isinstance(bucket, set):
+            bucket = set(bucket or [])
+            self._asset_category_map[norm] = bucket
+        bucket.add(int(category_id))
         self._refresh_catalog_events()
         self._apply_model_filters(keep_selection=True)
         self._set_status_text(f"Категория назначена: {os.path.basename(file_path)}")
+
+    def _on_assign_paths_to_virtual_category(self, file_paths, category_id: int):
+        cid = int(category_id or 0)
+        paths = [p for p in (file_paths or []) if p]
+        if cid <= 0 or not paths:
+            return
+        assigned = 0
+        for file_path in paths:
+            try:
+                set_asset_category(file_path, cid, db_path=self.catalog_db_path)
+            except Exception:
+                continue
+            norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
+            bucket = self._asset_category_map.setdefault(norm, set())
+            if not isinstance(bucket, set):
+                bucket = set(bucket or [])
+                self._asset_category_map[norm] = bucket
+            if cid not in bucket:
+                bucket.add(cid)
+            assigned += 1
+        self._refresh_catalog_events()
+        self._apply_model_filters(keep_selection=True)
+        self._set_status_text(f"Назначено в категорию: {assigned} моделей")
 
     def _sync_filters_to_dock(self):
         if self.catalog_panel is None:
@@ -2467,6 +2529,7 @@ class MainWindow(QMainWindow):
             category_options=self._current_categories,
             selected_category=self.category_combo.currentText(),
             only_fav=self.only_favorites_checkbox.isChecked(),
+            only_uncategorized=self._only_uncategorized,
         )
 
     def _start_preview_batch(self):
@@ -2516,16 +2579,28 @@ class MainWindow(QMainWindow):
             only_favorites=self.only_favorites_checkbox.isChecked(),
             favorite_paths=self.favorite_paths,
         )
+        if self._only_uncategorized:
+            kept = []
+            for file_path in filtered:
+                norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
+                cats = self._asset_category_map.get(norm) or set()
+                if not isinstance(cats, set):
+                    cats = set(cats if isinstance(cats, (list, tuple, set)) else ([cats] if cats else []))
+                if not cats:
+                    kept.append(file_path)
+            filtered = kept
         selected_virtual = int(self._selected_virtual_category_id or 0)
-        if selected_virtual > 0:
+        if self._virtual_category_filter_enabled and selected_virtual > 0:
             allowed = self._virtual_category_descendants(selected_virtual)
             kept = []
             for file_path in filtered:
                 norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
-                cat_id = self._asset_category_map.get(norm)
-                if cat_id is None:
+                cats = self._asset_category_map.get(norm) or set()
+                if not isinstance(cats, set):
+                    cats = set(cats if isinstance(cats, (list, tuple, set)) else ([cats] if cats else []))
+                if not cats:
                     continue
-                if int(cat_id) in allowed:
+                if any(int(cat) in allowed for cat in cats):
                     kept.append(file_path)
             filtered = kept
         self.filtered_model_files = filtered

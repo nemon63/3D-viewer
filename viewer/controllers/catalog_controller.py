@@ -65,14 +65,16 @@ class CatalogController:
         favorite_paths: Set[str],
         preview_map_raw: Dict[str, str],
         preview_root: str,
-    ) -> Tuple[List[Tuple[str, str, bool]], Dict[str, str]]:
-        items: List[Tuple[str, str, bool]] = []
+        asset_categories_map: Optional[Dict[str, Set[int]]] = None,
+    ) -> Tuple[List[Tuple[str, str, bool, int]], Dict[str, str]]:
+        items: List[Tuple[str, str, bool, int]] = []
         preview_map: Dict[str, str] = {}
         for file_path in filtered_model_files:
             norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
             rel_display = os.path.relpath(file_path, root_directory) if root_directory else file_path
             is_favorite = norm in favorite_paths
-            items.append((file_path, rel_display, is_favorite))
+            category_count = len(asset_categories_map.get(norm, set())) if asset_categories_map else 0
+            items.append((file_path, rel_display, is_favorite, int(category_count)))
             preview_path = preview_map_raw.get(norm)
             if preview_path and os.path.isfile(preview_path):
                 pnorm = os.path.normcase(os.path.normpath(os.path.abspath(preview_path)))

@@ -27,8 +27,23 @@ def init_catalog_db(db_path=None):
         conn.execute("PRAGMA foreign_keys=ON;")
         with open(schema_path, "r", encoding="utf-8") as f:
             conn.executescript(f.read())
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS asset_category_links (
+                id INTEGER PRIMARY KEY,
+                asset_id INTEGER NOT NULL,
+                category_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(asset_id, category_id),
+                FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE,
+                FOREIGN KEY(category_id) REFERENCES categories(id) ON DELETE CASCADE
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_category_id ON assets(category_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_categories_parent_id ON categories(parent_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_asset_category_links_asset ON asset_category_links(asset_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_asset_category_links_category ON asset_category_links(category_id)")
         conn.commit()
     finally:
         conn.close()
@@ -540,7 +555,7 @@ def delete_category(category_id: int, db_path=None):
         conn.close()
 
 
-def set_asset_category(source_path: str, category_id=None, db_path=None):
+def set_asset_category(source_path: str, category_id=None, db_path=None, append=True):
     db_path = init_catalog_db(db_path)
     if not source_path:
         return
@@ -552,12 +567,34 @@ def set_asset_category(source_path: str, category_id=None, db_path=None):
     try:
         conn.execute("PRAGMA foreign_keys=ON;")
         asset_id = _ensure_asset_id(conn, source_path, now)
-        conn.execute("UPDATE assets SET category_id=?, updated_at=?, last_seen_at=? WHERE id=?", (category_value, now, now, asset_id))
+        if category_value is None:
+            conn.execute("DELETE FROM asset_category_links WHERE asset_id=?", (asset_id,))
+            conn.execute("UPDATE assets SET category_id=?, updated_at=?, last_seen_at=? WHERE id=?", (None, now, now, asset_id))
+        else:
+            if not append:
+                conn.execute("DELETE FROM asset_category_links WHERE asset_id=?", (asset_id,))
+            conn.execute(
+                """
+                INSERT INTO asset_category_links(asset_id, category_id, created_at)
+                VALUES(?, ?, ?)
+                ON CONFLICT(asset_id, category_id) DO NOTHING
+                """,
+                (asset_id, category_value, now),
+            )
+            current = conn.execute("SELECT category_id FROM assets WHERE id=?", (asset_id,)).fetchone()
+            current_primary = (int(current["category_id"]) if current and current["category_id"] is not None else None)
+            if current_primary is None or not append:
+                conn.execute(
+                    "UPDATE assets SET category_id=?, updated_at=?, last_seen_at=? WHERE id=?",
+                    (category_value, now, now, asset_id),
+                )
+            else:
+                conn.execute("UPDATE assets SET updated_at=?, last_seen_at=? WHERE id=?", (now, now, asset_id))
         _insert_event(
             conn,
             asset_id,
             "asset_category_set",
-            {"path": source_path, "category_id": category_value},
+            {"path": source_path, "category_id": category_value, "append": bool(append)},
             now,
         )
         conn.commit()
@@ -589,6 +626,48 @@ def get_asset_category_map(source_paths, db_path=None):
             continue
         norm = os.path.normcase(os.path.normpath(os.path.abspath(path)))
         out[norm] = (int(row["category_id"]) if row["category_id"] is not None else None)
+    return out
+
+
+def get_asset_categories_map(source_paths, db_path=None):
+    db_path = db_path or get_default_db_path()
+    if not os.path.isfile(db_path) or not source_paths:
+        return {}
+    normalized = [os.path.abspath(p) for p in source_paths if p]
+    if not normalized:
+        return {}
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        placeholders = ",".join(["?"] * len(normalized))
+        rows = conn.execute(
+            f"""
+            SELECT
+                a.source_path,
+                a.category_id AS primary_category_id,
+                l.category_id AS linked_category_id
+            FROM assets a
+            LEFT JOIN asset_category_links l ON l.asset_id = a.id
+            WHERE a.source_path IN ({placeholders})
+            """,
+            normalized,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    out = {}
+    for row in rows:
+        path = row["source_path"] or ""
+        if not path:
+            continue
+        norm = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+        bucket = out.setdefault(norm, set())
+        primary = row["primary_category_id"]
+        linked = row["linked_category_id"]
+        if primary is not None:
+            bucket.add(int(primary))
+        if linked is not None:
+            bucket.add(int(linked))
     return out
 
 

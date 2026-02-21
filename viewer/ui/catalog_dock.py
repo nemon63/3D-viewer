@@ -1,7 +1,7 @@
 import os
 
-from PyQt5.QtCore import QByteArray, QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QIcon, QPixmap
+from PyQt5.QtCore import QByteArray, QPoint, QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QDrag, QIcon, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -46,6 +46,34 @@ class ThumbnailListWidget(QListWidget):
             mime.setData("application/x-model-path", QByteArray(path.encode("utf-8")))
         return mime
 
+    def startDrag(self, supportedActions):
+        items = self.selectedItems()
+        if not items:
+            return
+        mime = self.mimeData(items)
+        if mime is None:
+            return
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        title = (items[0].text() or "").replace("★ ", "").strip() or "model"
+        if len(title) > 34:
+            title = title[:31] + "..."
+        pix = QPixmap(220, 28)
+        pix.fill(Qt.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(Qt.black)
+        painter.setOpacity(0.72)
+        painter.drawRoundedRect(0, 0, 220, 28, 6, 6)
+        painter.setOpacity(1.0)
+        painter.setPen(Qt.white)
+        painter.drawText(8, 19, title)
+        painter.end()
+        drag.setPixmap(pix)
+        drag.setHotSpot(QPoint(10, 14))
+        drag.exec_(Qt.CopyAction)
+
     def wheelEvent(self, event):
         if event.modifiers() & Qt.ControlModifier:
             delta = event.angleDelta().y()
@@ -80,23 +108,28 @@ class CatalogDockPanel(QWidget):
     nextRequested = pyqtSignal()
     toggleFavoriteRequested = pyqtSignal()
     filtersChanged = pyqtSignal(str, str, bool)
+    uncategorizedOnlyChanged = pyqtSignal(bool)
     thumbSizeChanged = pyqtSignal(int)
     batchStartRequested = pyqtSignal()
     batchStopRequested = pyqtSignal()
     batchResumeRequested = pyqtSignal()
     virtualCategoryFilterChanged = pyqtSignal(int)
+    virtualCategoryFilterModeChanged = pyqtSignal(bool)
     createCategoryRequested = pyqtSignal(int, str)
     renameCategoryRequested = pyqtSignal(int, str)
     deleteCategoryRequested = pyqtSignal(int)
     assignPathToCategoryRequested = pyqtSignal(str, int)
+    assignPathsToCategoryRequested = pyqtSignal(list, int)
     PREVIEW_PATH_ROLE = Qt.UserRole + 1
     CATEGORY_ID_ROLE = Qt.UserRole + 10
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.list_widget = ThumbnailListWidget(self)
+        self.list_widget.setSelectionMode(QListWidget.ExtendedSelection)
         self.list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.list_widget.customContextMenuRequested.connect(self._on_context_menu_requested)
+        self.list_widget.itemSelectionChanged.connect(self._refresh_assign_button_state)
         self.list_widget.thumbSizeChanged.connect(self.thumbSizeChanged.emit)
         self.list_widget.thumbSizeChanged.connect(self._on_thumb_size_changed)
         self._icon_cache = {}
@@ -119,6 +152,11 @@ class CatalogDockPanel(QWidget):
         self.category_combo.currentIndexChanged.connect(self._emit_filters)
         self.only_favorites_checkbox = QCheckBox("★", self)
         self.only_favorites_checkbox.stateChanged.connect(self._emit_filters)
+        self.only_uncategorized_checkbox = QCheckBox("Без кат.", self)
+        self.only_uncategorized_checkbox.setToolTip("Показывать только модели без назначенных категорий")
+        self.only_uncategorized_checkbox.stateChanged.connect(
+            lambda state: self.uncategorizedOnlyChanged.emit(state == Qt.Checked)
+        )
 
         self.prev_button = QPushButton("Пред", self)
         self.prev_button.clicked.connect(self.previousRequested.emit)
@@ -152,6 +190,15 @@ class CatalogDockPanel(QWidget):
         self.category_tree.dragEnterEvent = self._category_tree_drag_enter_event
         self.category_tree.dragMoveEvent = self._category_tree_drag_move_event
         self.category_tree.dropEvent = self._category_tree_drop_event
+        self.virtual_filter_checkbox = QCheckBox("Фильтр по выбранной категории", self)
+        self.virtual_filter_checkbox.setChecked(False)
+        self.virtual_filter_checkbox.stateChanged.connect(
+            lambda state: self.virtualCategoryFilterModeChanged.emit(state == Qt.Checked)
+        )
+        self.assign_selected_button = QPushButton("Назначить выбранную", self)
+        self.assign_selected_button.clicked.connect(self._assign_selected_to_current_category)
+        self.assign_multi_button = QPushButton("Назначить выделенные", self)
+        self.assign_multi_button.clicked.connect(self._assign_multi_selected_to_current_category)
 
         layout = QVBoxLayout(self)
         top_row = QHBoxLayout()
@@ -173,12 +220,16 @@ class CatalogDockPanel(QWidget):
         self.category_all_button.clicked.connect(lambda: self.set_selected_virtual_category(0))
         category_header.addWidget(self.category_all_button)
         layout.addLayout(category_header)
+        layout.addWidget(self.virtual_filter_checkbox)
+        layout.addWidget(self.assign_selected_button)
+        layout.addWidget(self.assign_multi_button)
         layout.addWidget(self.category_tree)
 
         filter_row = QHBoxLayout()
         filter_row.addWidget(self.search_input, stretch=1)
         filter_row.addWidget(self.category_combo, stretch=1)
         filter_row.addWidget(self.only_favorites_checkbox)
+        filter_row.addWidget(self.only_uncategorized_checkbox)
         layout.addLayout(filter_row)
 
         nav_row = QHBoxLayout()
@@ -199,6 +250,7 @@ class CatalogDockPanel(QWidget):
         layout.addWidget(self.batch_status_label)
         layout.addWidget(self.list_widget, stretch=1)
         self.set_virtual_categories([], selected_id=0)
+        self._refresh_assign_button_state()
 
     def set_items(self, items, preview_map):
         current_path = self.current_path()
@@ -207,13 +259,23 @@ class CatalogDockPanel(QWidget):
         self._pending_icon_index = 0
         self.list_widget.clear()
         target_item = None
-        for path, rel_display, is_favorite in items:
+        for row in items:
+            if len(row) >= 4:
+                path, rel_display, is_favorite, category_count = row[0], row[1], bool(row[2]), int(row[3] or 0)
+            else:
+                path, rel_display, is_favorite = row[0], row[1], bool(row[2])
+                category_count = 0
             title = os.path.basename(path)
             if is_favorite:
                 title = f"★ {title}"
+            if category_count <= 0:
+                title = f"[new] {title}"
             item = QListWidgetItem(title)
             item.setData(Qt.UserRole, path)
-            item.setToolTip(rel_display)
+            if category_count <= 0:
+                item.setToolTip(f"{rel_display}\nСтатус: без категории")
+            else:
+                item.setToolTip(f"{rel_display}\nКатегорий: {category_count}")
             preview_path = preview_map.get(path, "")
             if preview_path and os.path.isfile(preview_path):
                 item.setData(self.PREVIEW_PATH_ROLE, preview_path)
@@ -226,6 +288,7 @@ class CatalogDockPanel(QWidget):
         if target_item is not None:
             self.list_widget.setCurrentItem(target_item)
         self._schedule_pending_icons()
+        self._refresh_assign_button_state()
 
     def current_path(self):
         item = self.list_widget.currentItem()
@@ -233,7 +296,7 @@ class CatalogDockPanel(QWidget):
             return ""
         return item.data(Qt.UserRole) or ""
 
-    def set_filter_state(self, search_text: str, category_options, selected_category: str, only_fav: bool):
+    def set_filter_state(self, search_text: str, category_options, selected_category: str, only_fav: bool, only_uncategorized: bool = False):
         self.search_input.blockSignals(True)
         self.search_input.setText(search_text or "")
         self.search_input.blockSignals(False)
@@ -250,6 +313,9 @@ class CatalogDockPanel(QWidget):
         self.only_favorites_checkbox.blockSignals(True)
         self.only_favorites_checkbox.setChecked(bool(only_fav))
         self.only_favorites_checkbox.blockSignals(False)
+        self.only_uncategorized_checkbox.blockSignals(True)
+        self.only_uncategorized_checkbox.setChecked(bool(only_uncategorized))
+        self.only_uncategorized_checkbox.blockSignals(False)
 
     def set_virtual_categories(self, rows, selected_id: int = 0):
         self.category_tree.blockSignals(True)
@@ -283,6 +349,14 @@ class CatalogDockPanel(QWidget):
         self.set_selected_virtual_category(selected_id if selected_id in nodes or selected_id == 0 else 0)
         self.category_tree.blockSignals(False)
 
+    def set_virtual_filter_enabled(self, enabled: bool):
+        self.virtual_filter_checkbox.blockSignals(True)
+        self.virtual_filter_checkbox.setChecked(bool(enabled))
+        self.virtual_filter_checkbox.blockSignals(False)
+
+    def virtual_filter_enabled(self):
+        return bool(self.virtual_filter_checkbox.isChecked())
+
     def selected_virtual_category_id(self):
         item = self.category_tree.currentItem()
         if item is None:
@@ -301,6 +375,7 @@ class CatalogDockPanel(QWidget):
             if found is not None:
                 self.category_tree.setCurrentItem(found)
                 self.category_tree.scrollToItem(found)
+                self._refresh_assign_button_state()
                 return
 
     def _find_category_item(self, item, category_id: int):
@@ -319,7 +394,39 @@ class CatalogDockPanel(QWidget):
         return None
 
     def _on_virtual_category_selection_changed(self):
+        self._refresh_assign_button_state()
         self.virtualCategoryFilterChanged.emit(self.selected_virtual_category_id())
+
+    def _assign_selected_to_current_category(self):
+        path = self.current_path()
+        category_id = self.selected_virtual_category_id()
+        if not path or category_id <= 0:
+            return
+        self.assignPathToCategoryRequested.emit(path, category_id)
+
+    def _assign_multi_selected_to_current_category(self):
+        category_id = self.selected_virtual_category_id()
+        if category_id <= 0:
+            return
+        paths = self.selected_paths()
+        if not paths:
+            return
+        self.assignPathsToCategoryRequested.emit(paths, category_id)
+
+    def selected_paths(self):
+        out = []
+        for item in self.list_widget.selectedItems():
+            path = item.data(Qt.UserRole) or ""
+            if path:
+                out.append(path)
+        return out
+
+    def _refresh_assign_button_state(self):
+        has_path = bool(self.current_path())
+        selected_count = len(self.selected_paths())
+        has_category = self.selected_virtual_category_id() > 0
+        self.assign_selected_button.setEnabled(has_path and has_category)
+        self.assign_multi_button.setEnabled(selected_count > 0 and has_category)
 
     def _on_create_category(self):
         parent_id = self.selected_virtual_category_id()
@@ -548,6 +655,7 @@ class CatalogDockPanel(QWidget):
         act_open = menu.addAction("Открыть в 3D")
         act_regen = menu.addAction("Сделать новое превью")
         act_assign = menu.addAction("Назначить в выбранную категорию")
+        act_assign_multi = menu.addAction("Назначить выделенные в выбранную категорию")
         act_folder = menu.addAction("Открыть папку")
         act_copy = menu.addAction("Копировать путь")
         chosen = menu.exec_(self.list_widget.mapToGlobal(pos))
@@ -559,6 +667,8 @@ class CatalogDockPanel(QWidget):
             category_id = self.selected_virtual_category_id()
             if category_id > 0:
                 self.assignPathToCategoryRequested.emit(path, category_id)
+        elif chosen == act_assign_multi:
+            self._assign_multi_selected_to_current_category()
         elif chosen == act_folder:
             self.openFolderRequested.emit(path)
         elif chosen == act_copy:
