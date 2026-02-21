@@ -10,15 +10,29 @@ class ModelLoadWorker(QObject):
     loaded = pyqtSignal(int, object)
     failed = pyqtSignal(int, str)
 
-    def __init__(self, request_id: int, file_path: str, fast_mode: bool):
+    def __init__(
+        self,
+        request_id: int,
+        file_path: str,
+        fast_mode: bool,
+        normals_policy: str = "auto",
+        hard_angle_deg: float = 60.0,
+    ):
         super().__init__()
         self.request_id = request_id
         self.file_path = file_path
         self.fast_mode = fast_mode
+        self.normals_policy = str(normals_policy or "auto")
+        self.hard_angle_deg = float(hard_angle_deg or 60.0)
 
     def run(self):
         try:
-            payload = load_model_payload(self.file_path, fast_mode=self.fast_mode)
+            payload = load_model_payload(
+                self.file_path,
+                fast_mode=self.fast_mode,
+                normals_policy=self.normals_policy,
+                hard_angle_deg=self.hard_angle_deg,
+            )
             self.loaded.emit(self.request_id, payload)
         except Exception as exc:
             self.failed.emit(self.request_id, str(exc))

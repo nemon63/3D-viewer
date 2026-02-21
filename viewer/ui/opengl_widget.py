@@ -599,7 +599,7 @@ class OpenGLWidget(QOpenGLWidget):
     def load_mesh(self, file_path: str) -> bool:
         try:
             self._clear_all_textures()
-            payload = load_model_payload(file_path)
+            payload = load_model_payload(file_path, normals_policy="import")
             return self.apply_payload(payload)
         except Exception as exc:
             self.vertices = np.array([], dtype=np.float32)

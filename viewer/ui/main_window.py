@@ -357,6 +357,25 @@ class MainWindow(QMainWindow):
         collapse_row.addWidget(self.auto_collapse_slider, stretch=1)
         collapse_row.addWidget(self.auto_collapse_label)
         camera_mode_layout.addRow("Auto collapse", collapse_row)
+
+        self.normals_policy_combo = QComboBox(self)
+        self.normals_policy_combo.addItem("Import (FBX hard edges)", "import")
+        self.normals_policy_combo.addItem("Auto", "auto")
+        self.normals_policy_combo.addItem("Recompute Smooth", "recompute_smooth")
+        self.normals_policy_combo.addItem("Recompute Hard", "recompute_hard")
+        self.normals_policy_combo.currentIndexChanged.connect(self._on_normals_policy_changed)
+        camera_mode_layout.addRow("Normals", self.normals_policy_combo)
+
+        self.normals_hard_angle_label = QLabel("60°", self)
+        self.normals_hard_angle_slider = QSlider(Qt.Horizontal, self)
+        self.normals_hard_angle_slider.setRange(1, 180)
+        self.normals_hard_angle_slider.setValue(60)
+        self.normals_hard_angle_slider.setToolTip("Используется для режима Recompute Hard")
+        self.normals_hard_angle_slider.valueChanged.connect(self._on_normals_hard_angle_changed)
+        hard_angle_row = QHBoxLayout()
+        hard_angle_row.addWidget(self.normals_hard_angle_slider, stretch=1)
+        hard_angle_row.addWidget(self.normals_hard_angle_label)
+        camera_mode_layout.addRow("Hard angle", hard_angle_row)
         camera_root.addWidget(camera_mode_group)
 
         camera_speed_group = QGroupBox("Navigation Speed", self)
@@ -577,6 +596,8 @@ class MainWindow(QMainWindow):
         self._on_rotate_speed_changed(self.rotate_speed_slider.value())
         self._on_zoom_speed_changed(self.zoom_speed_slider.value())
         self._on_auto_collapse_changed(self.auto_collapse_slider.value())
+        self._on_normals_hard_angle_changed(self.normals_hard_angle_slider.value())
+        self._on_normals_policy_changed(self.normals_policy_combo.currentIndex())
         self._on_ambient_changed(self.ambient_slider.value())
         self._on_key_light_changed(self.key_light_slider.value())
         self._on_fill_light_changed(self.fill_light_slider.value())
@@ -990,6 +1011,8 @@ class MainWindow(QMainWindow):
         shadow_softness = self.settings.value("view/shadow_softness_slider", 100, type=int)
         shadow_quality = self.settings.value("view/shadow_quality", "balanced", type=str)
         auto_collapse = self.settings.value("view/auto_collapse_submeshes", 96, type=int)
+        normals_policy = self.settings.value("view/normals_policy", "import", type=str)
+        hard_angle = self.settings.value("view/normals_hard_angle", 60, type=int)
         alpha_cutoff = self.settings.value("view/alpha_cutoff_slider", 50, type=int)
         alpha_blend = self.settings.value("view/alpha_blend_slider", 100, type=int)
         alpha_mode = self.settings.value("view/alpha_mode", "cutout", type=str)
@@ -1019,6 +1042,9 @@ class MainWindow(QMainWindow):
         self.shadow_bias_slider.setValue(max(self.shadow_bias_slider.minimum(), min(self.shadow_bias_slider.maximum(), shadow_bias)))
         self.shadow_softness_slider.setValue(max(self.shadow_softness_slider.minimum(), min(self.shadow_softness_slider.maximum(), shadow_softness)))
         self.auto_collapse_slider.setValue(max(self.auto_collapse_slider.minimum(), min(self.auto_collapse_slider.maximum(), auto_collapse)))
+        self.normals_hard_angle_slider.setValue(
+            max(self.normals_hard_angle_slider.minimum(), min(self.normals_hard_angle_slider.maximum(), int(hard_angle)))
+        )
         self.alpha_cutoff_slider.setValue(max(self.alpha_cutoff_slider.minimum(), min(self.alpha_cutoff_slider.maximum(), alpha_cutoff)))
         self.alpha_blend_slider.setValue(max(self.alpha_blend_slider.minimum(), min(self.alpha_blend_slider.maximum(), alpha_blend)))
 
@@ -1045,6 +1071,9 @@ class MainWindow(QMainWindow):
         mode_idx = self.render_mode_combo.findData(render_mode)
         if mode_idx >= 0:
             self.render_mode_combo.setCurrentIndex(mode_idx)
+        normals_policy_idx = self.normals_policy_combo.findData(normals_policy)
+        if normals_policy_idx >= 0:
+            self.normals_policy_combo.setCurrentIndex(normals_policy_idx)
         shadow_quality_idx = self.shadow_quality_combo.findData(shadow_quality)
         if shadow_quality_idx >= 0:
             self.shadow_quality_combo.setCurrentIndex(shadow_quality_idx)
@@ -1723,6 +1752,10 @@ class MainWindow(QMainWindow):
         metal_name = _name(tex_paths.get("metal", ""))
         rough_name = _name(tex_paths.get("roughness", ""))
         normal_name = _name(tex_paths.get("normal", ""))
+        normals_source = str(debug.get("normals_source", "unknown"))
+        normals_policy = str(debug.get("normals_policy", "auto"))
+        smooth_fb = int(debug.get("fbx_smooth_fallback_normals", 0) or 0)
+        face_fb = int(debug.get("fbx_face_fallback_normals", 0) or 0)
         shadow_state = str(self.gl_widget.shadow_status_message or "off")
         projection = "ortho" if self.gl_widget.projection_mode == "orthographic" else "perspective"
         lines = [
@@ -1736,6 +1769,16 @@ class MainWindow(QMainWindow):
             _line("Metal", metal_name, "ok" if metal_name != "-" else "bad"),
             _line("Roughness", rough_name, "ok" if rough_name != "-" else "bad"),
             _line("Normal", normal_name, "ok" if normal_name != "-" else "bad"),
+            _line(
+                "Normals",
+                f"{normals_source} ({normals_policy})",
+                "ok" if normals_source == "import" else ("warn" if "fallback" in normals_source else "info"),
+            ),
+            _line(
+                "FBX fallback normals",
+                f"smooth:{smooth_fb} face:{face_fb}",
+                "warn" if (smooth_fb > 0 or face_fb > 0) else "muted",
+            ),
             _line("Normal space", self.gl_widget.normal_map_space, "info"),
             _line(
                 "Alpha",
@@ -1836,6 +1879,33 @@ class MainWindow(QMainWindow):
         self.gl_widget.set_auto_collapse_submesh_threshold(threshold)
         if self._settings_ready:
             self.settings.setValue("view/auto_collapse_submeshes", int(threshold))
+
+    def _current_normals_policy(self) -> str:
+        return str(self.normals_policy_combo.currentData() or "import")
+
+    def _current_hard_edge_angle(self) -> float:
+        return float(self.normals_hard_angle_slider.value())
+
+    def _on_normals_policy_changed(self, _value: int):
+        policy = self._current_normals_policy()
+        is_hard = policy == "recompute_hard"
+        self.normals_hard_angle_slider.setEnabled(is_hard)
+        self.normals_hard_angle_label.setEnabled(is_hard)
+        if self._settings_ready:
+            self.settings.setValue("view/normals_policy", policy)
+            row = self._current_model_index()
+            if 0 <= row < len(self.filtered_model_files):
+                self._load_model_at_row(row)
+
+    def _on_normals_hard_angle_changed(self, value: int):
+        angle = int(max(1, min(180, value)))
+        self.normals_hard_angle_label.setText(f"{angle}°")
+        if self._settings_ready:
+            self.settings.setValue("view/normals_hard_angle", int(angle))
+            if self._current_normals_policy() == "recompute_hard":
+                row = self._current_model_index()
+                if 0 <= row < len(self.filtered_model_files):
+                    self._load_model_at_row(row)
 
     def _on_rotate_speed_changed(self, value: int):
         speed = value / 500.0
@@ -1997,6 +2067,10 @@ class MainWindow(QMainWindow):
         self.rotate_speed_slider.setValue(100)
         self.zoom_speed_slider.setValue(110)
         self.auto_collapse_slider.setValue(96)
+        self.normals_hard_angle_slider.setValue(60)
+        nidx = self.normals_policy_combo.findData("import")
+        if nidx >= 0:
+            self.normals_policy_combo.setCurrentIndex(nidx)
         idx = self.projection_combo.findData("perspective")
         if idx >= 0:
             self.projection_combo.setCurrentIndex(idx)
@@ -2034,6 +2108,8 @@ class MainWindow(QMainWindow):
             row=row,
             file_path=file_path,
             fast_mode=(self.render_mode == "fast"),
+            normals_policy=self._current_normals_policy(),
+            hard_angle_deg=self._current_hard_edge_angle(),
         )
 
     def _on_model_loading_started(self, file_path: str):

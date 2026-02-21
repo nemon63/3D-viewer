@@ -8,7 +8,12 @@ from dataclasses import dataclass, field
 import numpy as np
 import trimesh
 
-from viewer.utils.geometry_utils import process_mesh_data
+from viewer.utils.geometry_utils import (
+    NORMALS_POLICY_AUTO,
+    NORMALS_POLICY_IMPORT,
+    NORMALS_POLICY_RECOMPUTE_HARD,
+    process_mesh_data,
+)
 from viewer.utils.texture_utils import (
     CHANNEL_BASECOLOR,
     CHANNEL_METAL,
@@ -27,7 +32,7 @@ except ImportError:
     fbx = None
 
 
-_PAYLOAD_CACHE_VERSION = "v5"
+_PAYLOAD_CACHE_VERSION = "v6"
 _PAYLOAD_CACHE_DIR = os.path.join(".cache", "payload_cache")
 _SMOOTH_FALLBACK_MAX_POLYGONS = 250000
 
@@ -44,18 +49,29 @@ class MeshPayload:
     debug_info: dict = field(default_factory=dict)
 
 
-def _payload_cache_path(file_path: str, fast_mode: bool) -> str:
+def _payload_cache_path(file_path: str, fast_mode: bool, normals_policy: str, hard_angle_deg: float) -> str:
     try:
         st = os.stat(file_path)
-        identity = f"{os.path.abspath(file_path)}|{st.st_size}|{st.st_mtime_ns}|{bool(fast_mode)}|{_PAYLOAD_CACHE_VERSION}"
+        identity = (
+            f"{os.path.abspath(file_path)}|{st.st_size}|{st.st_mtime_ns}|{bool(fast_mode)}"
+            f"|{str(normals_policy or NORMALS_POLICY_AUTO)}|{float(hard_angle_deg or 0.0):.3f}|{_PAYLOAD_CACHE_VERSION}"
+        )
     except OSError:
-        identity = f"{os.path.abspath(file_path)}|{bool(fast_mode)}|{_PAYLOAD_CACHE_VERSION}"
+        identity = (
+            f"{os.path.abspath(file_path)}|{bool(fast_mode)}"
+            f"|{str(normals_policy or NORMALS_POLICY_AUTO)}|{float(hard_angle_deg or 0.0):.3f}|{_PAYLOAD_CACHE_VERSION}"
+        )
     key = hashlib.sha1(identity.encode("utf-8")).hexdigest()
     return os.path.join(_PAYLOAD_CACHE_DIR, f"{key}.pkl")
 
 
-def _try_load_payload_cache(file_path: str, fast_mode: bool):
-    cache_path = _payload_cache_path(file_path, fast_mode=fast_mode)
+def _try_load_payload_cache(file_path: str, fast_mode: bool, normals_policy: str, hard_angle_deg: float):
+    cache_path = _payload_cache_path(
+        file_path,
+        fast_mode=fast_mode,
+        normals_policy=normals_policy,
+        hard_angle_deg=hard_angle_deg,
+    )
     if not os.path.isfile(cache_path):
         return None
     try:
@@ -68,8 +84,13 @@ def _try_load_payload_cache(file_path: str, fast_mode: bool):
         return None
 
 
-def _try_save_payload_cache(file_path: str, fast_mode: bool, payload: MeshPayload):
-    cache_path = _payload_cache_path(file_path, fast_mode=fast_mode)
+def _try_save_payload_cache(file_path: str, fast_mode: bool, normals_policy: str, hard_angle_deg: float, payload: MeshPayload):
+    cache_path = _payload_cache_path(
+        file_path,
+        fast_mode=fast_mode,
+        normals_policy=normals_policy,
+        hard_angle_deg=hard_angle_deg,
+    )
     try:
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         with open(cache_path, "wb") as fh:
@@ -78,9 +99,19 @@ def _try_save_payload_cache(file_path: str, fast_mode: bool, payload: MeshPayloa
         return
 
 
-def load_model_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
+def load_model_payload(
+    file_path: str,
+    fast_mode: bool = False,
+    normals_policy: str = NORMALS_POLICY_AUTO,
+    hard_angle_deg: float = 60.0,
+) -> MeshPayload:
     t0 = time.perf_counter()
-    cached = _try_load_payload_cache(file_path, fast_mode=fast_mode)
+    cached = _try_load_payload_cache(
+        file_path,
+        fast_mode=fast_mode,
+        normals_policy=normals_policy,
+        hard_angle_deg=hard_angle_deg,
+    )
     if cached is not None:
         cached.debug_info = dict(cached.debug_info or {})
         cached.debug_info["cache_hit"] = True
@@ -88,18 +119,39 @@ def load_model_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
         return cached
 
     if file_path.lower().endswith(".fbx"):
-        payload = _load_fbx_payload(file_path, fast_mode=fast_mode)
+        payload = _load_fbx_payload(
+            file_path,
+            fast_mode=fast_mode,
+            normals_policy=normals_policy,
+            hard_angle_deg=hard_angle_deg,
+        )
     else:
-        payload = _load_trimesh_payload(file_path, fast_mode=fast_mode)
+        payload = _load_trimesh_payload(
+            file_path,
+            fast_mode=fast_mode,
+            normals_policy=normals_policy,
+            hard_angle_deg=hard_angle_deg,
+        )
 
     payload.debug_info = dict(payload.debug_info or {})
     payload.debug_info["cache_hit"] = False
     payload.debug_info["timing_cache_io_sec"] = round(float(time.perf_counter() - t0), 4)
-    _try_save_payload_cache(file_path, fast_mode=fast_mode, payload=payload)
+    _try_save_payload_cache(
+        file_path,
+        fast_mode=fast_mode,
+        normals_policy=normals_policy,
+        hard_angle_deg=hard_angle_deg,
+        payload=payload,
+    )
     return payload
 
 
-def _load_trimesh_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
+def _load_trimesh_payload(
+    file_path: str,
+    fast_mode: bool = False,
+    normals_policy: str = NORMALS_POLICY_AUTO,
+    hard_angle_deg: float = 60.0,
+) -> MeshPayload:
     scene_or_mesh = trimesh.load(file_path)
     if isinstance(scene_or_mesh, trimesh.Scene):
         meshes = _extract_scene_meshes(scene_or_mesh)
@@ -108,11 +160,15 @@ def _load_trimesh_payload(file_path: str, fast_mode: bool = False) -> MeshPayloa
 
         loader_name = "trimesh_scene_single" if len(meshes) == 1 else "trimesh_scene_multi"
         combined_vertices, combined_indices, combined_normals, combined_texcoords = _combine_scene_meshes(meshes)
-        vertices, indices, normals = process_mesh_data(
+        vertices, indices, normals, normal_meta = process_mesh_data(
             combined_vertices,
             combined_indices,
             combined_normals,
             recompute_normals=not fast_mode,
+            normals_policy=normals_policy,
+            hard_angle_deg=hard_angle_deg,
+            fast_mode=fast_mode,
+            return_meta=True,
         )
         texcoords = np.array(combined_texcoords, dtype=np.float32)
         if texcoords.ndim != 2 or texcoords.shape[1] != 2 or texcoords.shape[0] != vertices.shape[0]:
@@ -141,14 +197,19 @@ def _load_trimesh_payload(file_path: str, fast_mode: bool = False) -> MeshPayloa
                 "loader": loader_name,
                 "uv_count": int(texcoords.shape[0]) if texcoords.ndim == 2 else 0,
                 "texture_candidates_count": len(texture_candidates),
+                **normal_meta,
             },
         )
 
-    vertices, indices, normals = process_mesh_data(
+    vertices, indices, normals, normal_meta = process_mesh_data(
         scene_or_mesh.vertices,
         scene_or_mesh.faces,
         [],
         recompute_normals=not fast_mode,
+        normals_policy=normals_policy,
+        hard_angle_deg=hard_angle_deg,
+        fast_mode=fast_mode,
+        return_meta=True,
     )
     texcoords = _extract_trimesh_uv(scene_or_mesh)
     model_hint = os.path.splitext(os.path.basename(file_path))[0]
@@ -170,7 +231,11 @@ def _load_trimesh_payload(file_path: str, fast_mode: bool = False) -> MeshPayloa
                 "texture_paths": _select_texture_paths(texture_sets, hint_names=[model_hint, "mesh"]),
             }
         ],
-        debug_info={"loader": "trimesh_mesh", "uv_count": int(texcoords.shape[0]) if texcoords.ndim == 2 else 0},
+        debug_info={
+            "loader": "trimesh_mesh",
+            "uv_count": int(texcoords.shape[0]) if texcoords.ndim == 2 else 0,
+            **normal_meta,
+        },
     )
 
 
@@ -459,7 +524,12 @@ def _pick_best_texture_path(candidates, hint_names=None):
     return best_path
 
 
-def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
+def _load_fbx_payload(
+    file_path: str,
+    fast_mode: bool = False,
+    normals_policy: str = NORMALS_POLICY_IMPORT,
+    hard_angle_deg: float = 60.0,
+) -> MeshPayload:
     if fbx is None:
         raise RuntimeError("FBX SDK is not installed.")
 
@@ -484,6 +554,10 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
         pre_material_texture_candidates = _collect_fbx_material_textures(scene, file_path)
         pre_fs_texture_candidates = find_texture_candidates(file_path)
         has_potential_textures = bool(pre_material_texture_candidates or pre_fs_texture_candidates)
+        allow_smooth_fallback = str(normals_policy or "").lower() not in {
+            NORMALS_POLICY_IMPORT,
+            NORMALS_POLICY_RECOMPUTE_HARD,
+        }
         (
             vertices_raw,
             indices_raw,
@@ -492,13 +566,22 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
             fbx_debug,
             submesh_groups,
             material_textures,
-        ) = _parse_fbx_scene(scene, model_dir=model_dir, collect_uv=has_potential_textures)
+        ) = _parse_fbx_scene(
+            scene,
+            model_dir=model_dir,
+            collect_uv=has_potential_textures,
+            allow_smooth_fallback=allow_smooth_fallback,
+        )
         t_parse_done = time.perf_counter()
-        vertices, indices, normals = process_mesh_data(
+        vertices, indices, normals, normal_meta = process_mesh_data(
             vertices_raw,
             indices_raw,
             normals_raw,
             recompute_normals=not fast_mode,
+            normals_policy=normals_policy,
+            hard_angle_deg=hard_angle_deg,
+            fast_mode=fast_mode,
+            return_meta=True,
         )
         t_process_done = time.perf_counter()
 
@@ -596,6 +679,7 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
                 "timing_texture_sec": round(float(t_textures_done - t_process_done), 4),
                 "timing_total_sec": round(float(t_textures_done - t_import_start), 4),
                 "uv_parse_enabled": bool(has_potential_textures),
+                **normal_meta,
                 **fbx_debug,
             },
         )
@@ -603,7 +687,7 @@ def _load_fbx_payload(file_path: str, fast_mode: bool = False) -> MeshPayload:
         manager.Destroy()
 
 
-def _parse_fbx_scene(scene, model_dir: str, collect_uv: bool = True):
+def _parse_fbx_scene(scene, model_dir: str, collect_uv: bool = True, allow_smooth_fallback: bool = True):
     vertices = []
     indices = []
     normals = []
@@ -635,7 +719,9 @@ def _parse_fbx_scene(scene, model_dir: str, collect_uv: bool = True):
         poly_count = int(mesh.GetPolygonCount())
         polygon_sizes = [int(mesh.GetPolygonSize(j)) for j in range(poly_count)]
         uv_resolver = _build_fbx_uv_resolver(mesh, polygon_sizes, uv_set_name) if collect_uv else None
-        smooth_fallback_enabled = bool(collect_uv and poly_count <= _SMOOTH_FALLBACK_MAX_POLYGONS)
+        smooth_fallback_enabled = bool(
+            collect_uv and allow_smooth_fallback and poly_count <= _SMOOTH_FALLBACK_MAX_POLYGONS
+        )
         cp_smooth_normals = None
         polygon_materials = _get_polygon_material_indices(mesh)
         is_multi_material = _mesh_uses_multiple_materials(node, polygon_materials)

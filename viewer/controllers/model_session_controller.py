@@ -28,7 +28,14 @@ class ModelSessionController(QObject):
     def active_path(self) -> str:
         return self._active_path
 
-    def start_load(self, row: int, file_path: str, fast_mode: bool):
+    def start_load(
+        self,
+        row: int,
+        file_path: str,
+        fast_mode: bool,
+        normals_policy: str = "auto",
+        hard_angle_deg: float = 60.0,
+    ):
         self._request_id += 1
         request_id = self._request_id
         self._active_row = int(row)
@@ -36,7 +43,13 @@ class ModelSessionController(QObject):
         self.loadingStarted.emit(self._active_path)
 
         thread = QThread(self)
-        worker = ModelLoadWorker(request_id, self._active_path, fast_mode=bool(fast_mode))
+        worker = ModelLoadWorker(
+            request_id,
+            self._active_path,
+            fast_mode=bool(fast_mode),
+            normals_policy=str(normals_policy or "auto"),
+            hard_angle_deg=float(hard_angle_deg or 60.0),
+        )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.loaded.connect(self._on_worker_loaded)
