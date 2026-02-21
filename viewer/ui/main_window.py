@@ -1,5 +1,4 @@
 import os
-import html
 from PyQt5.QtCore import QSettings, QSize, Qt
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
@@ -35,6 +34,7 @@ from viewer.controllers.catalog_ui_controller import CatalogUiController
 from viewer.controllers.catalog_view_controller import CatalogViewController
 from viewer.controllers.directory_scan_controller import DirectoryScanController
 from viewer.controllers.material_controller import MaterialController
+from viewer.controllers.material_ui_controller import MaterialUiController
 from viewer.controllers.model_session_controller import ModelSessionController
 from viewer.controllers.preview_ui_controller import PreviewUiController
 from viewer.controllers.render_settings_controller import RenderSettingsController
@@ -46,11 +46,6 @@ from viewer.services.catalog_db import (
 )
 from viewer.services.pipeline_validation import (
     load_profiles_config,
-)
-from viewer.services.texture_sets import (
-    build_texture_set_profiles,
-    match_profile_key,
-    profile_by_key,
 )
 
 
@@ -116,6 +111,7 @@ class MainWindow(QMainWindow):
         self.virtual_catalog_controller = VirtualCatalogController()
         self.workspace_ui_controller = WorkspaceUiController(self)
         self.material_controller = MaterialController(self.material_channels)
+        self.material_ui_controller = MaterialUiController(self)
         self.directory_scan_controller = DirectoryScanController(self)
         self.directory_scan_controller.scanFinished.connect(self._on_directory_scan_finished)
         self.directory_scan_controller.scanFailed.connect(self._on_directory_scan_failed)
@@ -1148,415 +1144,76 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Overlay: {state}", 1500)
 
     def _populate_material_controls(self, texture_sets):
-        previous_uid = self._selected_material_uid()
-        self.material_targets = self._material_targets_from_submeshes()
-        self._syncing_material_ui = True
-        try:
-            combo = self.material_target_combo
-            if combo is not None:
-                combo.blockSignals(True)
-                combo.clear()
-                for target in self.material_targets:
-                    combo.addItem(str(target.get("label") or target.get("name") or "material"), str(target.get("uid") or ""))
-                idx = combo.findData(previous_uid) if previous_uid else -1
-                if idx < 0:
-                    idx = combo.findData("__global__")
-                    if idx < 0:
-                        idx = 0
-                combo.setCurrentIndex(idx)
-                combo.setEnabled(combo.count() > 1)
-                combo.blockSignals(False)
-        finally:
-            self._syncing_material_ui = False
-
-        self._refresh_material_channel_controls()
-        self._refresh_two_sided_control()
+        self.material_ui_controller.populate_material_controls(texture_sets)
 
     def _material_targets_from_submeshes(self):
-        return self.material_controller.material_targets_from_submeshes(self.gl_widget.submeshes or [])
+        return self.material_ui_controller.material_targets_from_submeshes()
 
     def _selected_material_uid(self):
-        if self.material_target_combo is None:
-            return ""
-        value = self.material_target_combo.currentData()
-        if not value or value == "__global__":
-            return ""
-        return str(value)
+        return self.material_ui_controller.selected_material_uid()
 
     def _selected_material_label(self):
-        if self.material_target_combo is None:
-            return "Global"
-        value = self.material_target_combo.currentData()
-        text = self.material_target_combo.currentText() or "Global"
-        return "Global" if not value or value == "__global__" else text
+        return self.material_ui_controller.selected_material_label()
 
     def _material_texture_sets_for_target(self, material_uid: str):
-        return self.material_controller.material_texture_sets_for_target(self.gl_widget, material_uid)
+        return self.material_ui_controller.material_texture_sets_for_target(material_uid)
 
     def _global_material_channel_states(self):
-        return self.material_controller.global_material_channel_states(self.gl_widget)
+        return self.material_ui_controller.global_material_channel_states()
 
     def _refresh_material_channel_controls(self):
-        material_uid = self._selected_material_uid()
-        effective_paths, texture_sets = self._collect_effective_texture_channels(material_uid=material_uid)
-        global_states = self._global_material_channel_states() if not material_uid else {}
-        self._texture_set_profiles = build_texture_set_profiles(texture_sets or {})
-        self._sync_texture_set_selection_from_current_channels(current_paths=effective_paths)
-
-        for channel, _title in self.material_channels:
-            combo = self.material_boxes[channel]
-            combo.blockSignals(True)
-            combo.clear()
-            combo.addItem("None", "")
-            if not material_uid and global_states.get(channel, {}).get("state") == "mixed":
-                combo.addItem("Mixed", "__mixed__")
-            for path in texture_sets.get(channel, []):
-                combo.addItem(os.path.basename(path), path)
-            if not material_uid:
-                state = global_states.get(channel, {}).get("state")
-                if state == "mixed":
-                    selected = "__mixed__"
-                elif state == "single":
-                    selected = global_states.get(channel, {}).get("path") or ""
-                else:
-                    selected = ""
-            else:
-                selected = effective_paths.get(channel, "")
-            if selected and selected != "__mixed__" and combo.findData(selected) < 0:
-                combo.addItem(os.path.basename(selected), selected)
-            matched = combo.findData(selected)
-            if matched >= 0:
-                combo.setCurrentIndex(matched)
-            else:
-                combo.setCurrentIndex(0)
-            combo.blockSignals(False)
-        self._sync_texture_set_selection_from_current_channels()
+        self.material_ui_controller.refresh_material_channel_controls()
 
     def _on_texture_set_changed(self):
-        if self._syncing_texture_set_ui or self.texture_set_combo is None:
-            return
-        key = self.texture_set_combo.currentData()
-        if not key or key == "__custom__":
-            return
-        profile = profile_by_key(self._texture_set_profiles, str(key))
-        if not profile:
-            return
-
-        paths = profile.get("paths") or {}
-        material_uid = self._selected_material_uid()
-        any_applied = False
-        self._syncing_texture_set_ui = True
-        try:
-            for channel, _title in self.material_channels:
-                path = str(paths.get(channel) or "")
-                combo = self.material_boxes.get(channel)
-                if combo is not None:
-                    combo.blockSignals(True)
-                    idx = combo.findData(path) if path else 0
-                    combo.setCurrentIndex(idx if idx >= 0 else 0)
-                    combo.blockSignals(False)
-                if self.gl_widget.apply_texture_path(channel, path, material_uid=material_uid):
-                    any_applied = True
-        finally:
-            self._syncing_texture_set_ui = False
-
-        if any_applied:
-            self._persist_texture_overrides_for_current()
-        self._update_status(self._current_model_index())
-        self._refresh_overlay_data()
-        self._refresh_validation_data()
+        self.material_ui_controller.on_texture_set_changed()
 
     def _sync_texture_set_selection_from_current_channels(self, current_paths=None):
-        if self.texture_set_combo is None:
-            return
-        if current_paths is None:
-            current_paths = {}
-            for channel, _title in self.material_channels:
-                combo = self.material_boxes.get(channel)
-                value = combo.currentData() if combo is not None else ""
-                current_paths[channel] = "" if value == "__mixed__" else value
-
-        matched_key = match_profile_key(self._texture_set_profiles, current_paths or {})
-
-        combo = self.texture_set_combo
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem("Custom", "__custom__")
-        for profile in self._texture_set_profiles:
-            combo.addItem(str(profile.get("label") or profile.get("key") or "set"), str(profile.get("key") or ""))
-        target = matched_key or "__custom__"
-        idx = combo.findData(target)
-        combo.setCurrentIndex(idx if idx >= 0 else 0)
-        combo.setEnabled(combo.count() > 1)
-        combo.blockSignals(False)
+        self.material_ui_controller.sync_texture_set_selection_from_current_channels(current_paths=current_paths)
 
     def _on_material_target_changed(self):
-        if self._syncing_material_ui:
-            return
-        self._refresh_material_channel_controls()
-        self._refresh_two_sided_control()
-        self._update_status(self._current_model_index())
-        self._refresh_overlay_data()
-        self._refresh_validation_data()
+        self.material_ui_controller.on_material_target_changed()
 
     def _collect_effective_texture_channels(self, material_uid: str = ""):
-        return self.material_controller.collect_effective_texture_channels(self.gl_widget, material_uid=material_uid)
+        return self.material_ui_controller.collect_effective_texture_channels(material_uid=material_uid)
 
     def _texture_override_payload_from_state(self):
-        return self.material_controller.texture_override_payload_from_state(self.gl_widget)
+        return self.material_ui_controller.texture_override_payload_from_state()
 
     def _persist_texture_overrides_for_current(self):
-        if self._restoring_texture_overrides:
-            return
-        source_path = self.current_file_path or self.model_session_controller.active_path or self._current_selected_path() or ""
-        if not source_path:
-            return
-        self.material_controller.persist_texture_overrides(
-            file_path=source_path,
-            gl_widget=self.gl_widget,
-            db_path=self.catalog_db_path,
-        )
+        self.material_ui_controller.persist_texture_overrides_for_current()
 
     def _restore_texture_overrides_for_file(self, file_path: str):
-        if not file_path:
-            return
-        payload = self.material_controller.load_texture_overrides_payload(
-            file_path=file_path,
-            db_path=self.catalog_db_path,
-        )
-        if not payload:
-            return
-        self._restoring_texture_overrides = True
-        try:
-            self.material_controller.apply_texture_overrides_payload(payload, self.gl_widget)
-        finally:
-            self._restoring_texture_overrides = False
-        self._refresh_two_sided_control()
+        self.material_ui_controller.restore_texture_overrides_for_file(file_path)
 
     def _on_material_channel_changed(self, channel):
-        self._apply_channel_texture(channel)
+        self.material_ui_controller.on_material_channel_changed(channel)
 
     def _refresh_two_sided_control(self):
-        if not hasattr(self, "two_sided_checkbox") or self.two_sided_checkbox is None:
-            return
-        material_uid = self._selected_material_uid()
-        enabled = self.gl_widget.get_effective_two_sided(material_uid=material_uid)
-        self.two_sided_checkbox.blockSignals(True)
-        self.two_sided_checkbox.setChecked(bool(enabled))
-        self.two_sided_checkbox.blockSignals(False)
+        self.material_ui_controller.refresh_two_sided_control()
 
     def _on_two_sided_changed(self, state: int):
-        material_uid = self._selected_material_uid()
-        enabled = state == Qt.Checked
-        self.gl_widget.set_two_sided(enabled, material_uid=material_uid)
-        self._persist_texture_overrides_for_current()
-        self._update_status(self._current_model_index())
-        self._refresh_overlay_data()
+        self.material_ui_controller.on_two_sided_changed(state)
 
     def _apply_preview_channel(self):
-        channel = self.preview_channel_combo.currentData()
-        combo = self.material_boxes.get(channel)
-        if combo is None:
-            return
-        path = combo.currentData()
-        if path:
-            self.gl_widget.apply_texture_path("basecolor", path, material_uid=self._selected_material_uid())
-            self._update_status(self._current_model_index())
-            self._sync_texture_set_selection_from_current_channels()
-            self._refresh_overlay_data()
-            self._refresh_validation_data()
+        self.material_ui_controller.apply_preview_channel()
 
     def _assign_texture_file_to_channel(self, channel=None):
-        if channel is None:
-            channel = self.preview_channel_combo.currentData() if self.preview_channel_combo is not None else ""
-        if not channel:
-            self._set_status_text("Канал не выбран.")
-            return
-
-        current_path = self.current_file_path or self._current_selected_path() or ""
-        base_dir = os.path.dirname(current_path) if current_path else (self.current_directory or os.getcwd())
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Выберите текстуру",
-            base_dir,
-            "Images (*.png *.jpg *.jpeg *.tga *.bmp *.tif *.tiff);;All files (*.*)",
-        )
-        if not file_path:
-            return
-
-        material_uid = self._selected_material_uid()
-        applied = self.gl_widget.apply_texture_path(channel, file_path, material_uid=material_uid)
-        if applied:
-            self._persist_texture_overrides_for_current()
-
-        combo = self.material_boxes.get(channel)
-        if combo is not None:
-            combo.blockSignals(True)
-            idx = combo.findData(file_path)
-            if idx < 0:
-                combo.addItem(os.path.basename(file_path), file_path)
-                idx = combo.findData(file_path)
-            combo.setCurrentIndex(idx if idx >= 0 else 0)
-            combo.blockSignals(False)
-
-        self._set_status_text(f"Назначено в {channel}: {os.path.basename(file_path)}")
-        self._update_status(self._current_model_index())
-        self._sync_texture_set_selection_from_current_channels()
-        self._refresh_overlay_data()
-        self._refresh_validation_data()
+        self.material_ui_controller.assign_texture_file_to_channel(channel=channel)
 
     def _clear_channel_texture(self, channel):
-        if not channel:
-            return
-        material_uid = self._selected_material_uid()
-        if self.gl_widget.apply_texture_path(channel, "", material_uid=material_uid):
-            self._persist_texture_overrides_for_current()
-        combo = self.material_boxes.get(channel)
-        if combo is not None:
-            combo.blockSignals(True)
-            idx = combo.findData("")
-            combo.setCurrentIndex(idx if idx >= 0 else 0)
-            combo.blockSignals(False)
-        self._set_status_text(f"Канал очищен: {channel}")
-        self._update_status(self._current_model_index())
-        self._sync_texture_set_selection_from_current_channels()
-        self._refresh_overlay_data()
-        self._refresh_validation_data()
+        self.material_ui_controller.clear_channel_texture(channel)
 
     def _apply_channel_texture(self, channel):
-        if self._syncing_texture_set_ui:
-            return
-        combo = self.material_boxes.get(channel)
-        if combo is None:
-            return
-        path = combo.currentData()
-        if path == "__mixed__":
-            return
-        if self.gl_widget.apply_texture_path(channel, path or "", material_uid=self._selected_material_uid()):
-            self._persist_texture_overrides_for_current()
-        self._update_status(self._current_model_index())
-        self._sync_texture_set_selection_from_current_channels()
-        self._refresh_validation_data()
+        self.material_ui_controller.apply_channel_texture(channel)
 
     def _reset_texture_overrides_for_current(self):
-        file_path = self.current_file_path or self._current_selected_path() or ""
-        if not file_path:
-            self._set_status_text("Нет активной модели для сброса overrides.")
-            return
-        self.material_controller.clear_texture_overrides(
-            file_path=file_path,
-            db_path=self.catalog_db_path,
-        )
-        self._set_status_text(f"Overrides сброшены: {os.path.basename(file_path)}")
-        self._open_model_by_path(file_path)
+        self.material_ui_controller.reset_texture_overrides_for_current()
 
     def _refresh_overlay_data(self, file_path: str = ""):
-        active_path = file_path or self.current_file_path or self._current_selected_path() or ""
-        debug = self.gl_widget.last_debug_info or {}
-        vertices = int(self.gl_widget.vertices.shape[0]) if getattr(self.gl_widget.vertices, "ndim", 0) == 2 else 0
-        triangles = int(self.gl_widget.indices.size // 3) if self.gl_widget.indices.size else 0
-        submeshes = len(self.gl_widget.submeshes or [])
-        objects = int(debug.get("object_count", 0) or 0)
-        materials = int(debug.get("material_count", 0) or 0)
-        uv_count = int(debug.get("uv_count", 0) or 0)
-        tex_candidates = int(debug.get("texture_candidates_count", 0) or 0)
-
-        def _name(path):
-            return os.path.basename(path) if path else "-"
-
-        def _line(label: str, value: str, state: str = "info"):
-            palette = {
-                "ok": "#7DDE92",
-                "warn": "#F3C969",
-                "bad": "#FF9A9A",
-                "muted": "#A8B4C8",
-                "info": "#DCE5F0",
-            }
-            label_color = "#AFC3DA"
-            value_color = palette.get(state, palette["info"])
-            return (
-                f"<span style='color:{label_color};'>{html.escape(label)}: </span>"
-                f"<span style='color:{value_color}; font-weight:600;'>{html.escape(str(value))}</span>"
-            )
-
-        material_uid = self._selected_material_uid()
-        tex_paths, _ = self._collect_effective_texture_channels(material_uid=material_uid)
-        if self.texture_set_combo is not None and self.texture_set_combo.currentData() not in (None, "__custom__"):
-            texture_set_label = self.texture_set_combo.currentText()
-        else:
-            texture_set_label = "Custom"
-        material_label = self._selected_material_label()
-        base_name = _name(tex_paths.get("basecolor", ""))
-        metal_name = _name(tex_paths.get("metal", ""))
-        rough_name = _name(tex_paths.get("roughness", ""))
-        normal_name = _name(tex_paths.get("normal", ""))
-        normals_source = str(debug.get("normals_source", "unknown"))
-        normals_policy = str(debug.get("normals_policy", "auto"))
-        smooth_fb = int(debug.get("fbx_smooth_fallback_normals", 0) or 0)
-        face_fb = int(debug.get("fbx_face_fallback_normals", 0) or 0)
-        shadow_state = str(self.gl_widget.shadow_status_message or "off")
-        projection = "ortho" if self.gl_widget.projection_mode == "orthographic" else "perspective"
-        category_count = 0
-        if active_path:
-            category_count = self.virtual_catalog_controller.category_count_for_path(active_path)
-        lines = [
-            _line("Model", os.path.basename(active_path) if active_path else "-", "info"),
-            _line("Vertices / Triangles", f"{vertices:,} / {triangles:,}", "info"),
-            _line("Objects / Submeshes / Materials", f"{objects} / {submeshes} / {materials}", "info"),
-            _line("Catalog categories", str(category_count), "ok" if category_count > 0 else "warn"),
-            _line("Material target", material_label, "info"),
-            _line("UV vertices / Texture candidates", f"{uv_count:,} / {tex_candidates}", "info"),
-            _line("Texture set", texture_set_label, "ok" if texture_set_label != "Custom" else "warn"),
-            _line("Base", base_name, "ok" if base_name != "-" else "bad"),
-            _line("Metal", metal_name, "ok" if metal_name != "-" else "bad"),
-            _line("Roughness", rough_name, "ok" if rough_name != "-" else "bad"),
-            _line("Normal", normal_name, "ok" if normal_name != "-" else "bad"),
-            _line(
-                "Normals",
-                f"{normals_source} ({normals_policy})",
-                "ok" if normals_source == "import" else ("warn" if "fallback" in normals_source else "info"),
-            ),
-            _line(
-                "FBX fallback normals",
-                f"smooth:{smooth_fb} face:{face_fb}",
-                "warn" if (smooth_fb > 0 or face_fb > 0) else "muted",
-            ),
-            _line("Normal space", self.gl_widget.normal_map_space, "info"),
-            _line(
-                "Alpha",
-                f"{self.gl_widget.alpha_render_mode} | base alpha: {'on' if self.gl_widget.use_base_alpha_in_blend else 'off'} | blend: {self.gl_widget.alpha_blend_opacity:.2f}",
-                "warn" if self.gl_widget.alpha_render_mode == "blend" else "info",
-            ),
-            _line(
-                "Projection / Shadows",
-                f"{projection} / {shadow_state}",
-                "ok" if shadow_state == "on" else ("warn" if shadow_state.startswith("off") else "bad"),
-            ),
-        ]
-        self.gl_widget.set_overlay_lines(lines)
+        self.material_ui_controller.refresh_overlay_data(file_path=file_path)
 
     def _update_status(self, row):
-        if row < 0 or row >= len(self.filtered_model_files):
-            self._refresh_overlay_data()
-            return
-        file_path = self.filtered_model_files[row]
-        debug = self.gl_widget.last_debug_info or {}
-        uv_count = debug.get("uv_count", 0)
-        tex_count = debug.get("texture_candidates_count", 0)
-        selected_paths = self.gl_widget.get_effective_texture_paths(material_uid=self._selected_material_uid())
-        tex_file = os.path.basename(selected_paths.get("basecolor") or "") if selected_paths.get("basecolor") else "none"
-        preview = "unlit" if self.gl_widget.unlit_texture_preview else "lit"
-        projection = "ortho" if self.gl_widget.projection_mode == "orthographic" else "persp"
-        shadow_state = self.gl_widget.shadow_status_message
-        category_count = self.virtual_catalog_controller.category_count_for_path(file_path)
-        category_state = f"cat:{category_count}" if category_count > 0 else "cat:new"
-        self._set_status_text(
-            f"Открыт: {os.path.basename(file_path)} ({row + 1}/{len(self.filtered_model_files)}) | "
-            f"UV: {uv_count} | Текстур-кандидатов: {tex_count} | Текстура: {tex_file} | "
-            f"{preview} | {projection} | shadows:{shadow_state} | {category_state}"
-        )
-        self._refresh_overlay_data(file_path)
-        self._append_index_status()
+        self.material_ui_controller.update_status(row)
 
     def _on_alpha_cutoff_changed(self, value: int):
         self.render_settings_controller.on_alpha_cutoff_changed(value)
