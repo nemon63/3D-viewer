@@ -11,6 +11,7 @@ from viewer.controllers.material_controller import MaterialController
 from viewer.controllers.model_session_controller import ModelSessionController
 from viewer.controllers.preview_ui_controller import PreviewUiController
 from viewer.controllers.render_settings_controller import RenderSettingsController
+from viewer.controllers.validation_controller import ValidationController
 from viewer.controllers.virtual_catalog_controller import VirtualCatalogController
 from viewer.controllers.workspace_ui_controller import WorkspaceUiController
 
@@ -26,6 +27,7 @@ __all__ = [
     "ModelSessionController",
     "PreviewUiController",
     "RenderSettingsController",
+    "ValidationController",
     "VirtualCatalogController",
     "WorkspaceUiController",
 ]
