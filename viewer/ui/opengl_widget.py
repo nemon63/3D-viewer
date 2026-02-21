@@ -1541,6 +1541,15 @@ class OpenGLWidget(QOpenGLWidget):
             self.update()
             return
 
+        if event.buttons() == Qt.MiddleButton:
+            dx = event.x() - self.last_mouse_pos.x()
+            rot_scale = self.rotate_speed * accel
+            # UX: MMB horizontal drag = camera azimuth (yaw) adjust.
+            self.angle_y = (self.angle_y - dx * rot_scale) % 360.0
+            self.last_mouse_pos = event.pos()
+            self.update()
+            return
+
         if event.buttons() == Qt.RightButton:
             dx = event.x() - self.last_mouse_pos.x()
             dy = event.y() - self.last_mouse_pos.y()
