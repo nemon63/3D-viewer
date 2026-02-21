@@ -1,12 +1,11 @@
 import os
 import html
 from PyQt5.QtCore import QSettings, QSize, Qt
-from PyQt5.QtGui import QBrush, QColor, QIcon, QPixmap
+from PyQt5.QtGui import QBrush, QColor
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDockWidget,
-    QColorDialog,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -34,14 +33,15 @@ from viewer.controllers.catalog_index_controller import CatalogIndexController
 from viewer.controllers.catalog_controller import CatalogController
 from viewer.controllers.catalog_log_controller import CatalogLogController
 from viewer.controllers.catalog_ui_controller import CatalogUiController
+from viewer.controllers.catalog_view_controller import CatalogViewController
 from viewer.controllers.directory_scan_controller import DirectoryScanController
 from viewer.controllers.material_controller import MaterialController
 from viewer.controllers.model_session_controller import ModelSessionController
 from viewer.controllers.preview_ui_controller import PreviewUiController
+from viewer.controllers.render_settings_controller import RenderSettingsController
 from viewer.controllers.virtual_catalog_controller import VirtualCatalogController
 from viewer.controllers.workspace_ui_controller import WorkspaceUiController
 from viewer.services.catalog_db import (
-    get_preview_paths_for_assets,
     init_catalog_db,
 )
 from viewer.services.pipeline_validation import (
@@ -49,7 +49,6 @@ from viewer.services.pipeline_validation import (
     load_profiles_config,
     run_validation_checks,
 )
-from viewer.services.preview_cache import get_preview_cache_dir
 from viewer.services.texture_sets import (
     build_texture_set_profiles,
     match_profile_key,
@@ -112,7 +111,9 @@ class MainWindow(QMainWindow):
         self.catalog_controller = CatalogController()
         self.catalog_log_controller = CatalogLogController(self)
         self.catalog_ui_controller = CatalogUiController(self)
+        self.catalog_view_controller = CatalogViewController(self)
         self.preview_ui_controller = PreviewUiController(self)
+        self.render_settings_controller = RenderSettingsController(self)
         self.virtual_catalog_controller = VirtualCatalogController()
         self.workspace_ui_controller = WorkspaceUiController(self)
         self.material_controller = MaterialController(self.material_channels)
@@ -1224,98 +1225,19 @@ class MainWindow(QMainWindow):
         self._set_status_text(f"Directory scan failed: {error_text}")
 
     def _top_category(self, file_path: str) -> str:
-        return self.catalog_controller.top_category(file_path, self.current_directory)
+        return self.catalog_view_controller.top_category(file_path)
 
     def _populate_category_filter(self):
-        unique = self.catalog_controller.categories_for_models(self.model_files, self.current_directory)
-        self._current_categories = unique
-        prev = self.category_combo.currentText() if hasattr(self, "category_combo") else "Все"
-        self.category_combo.blockSignals(True)
-        self.category_combo.clear()
-        self.category_combo.addItem("Все", "all")
-        for cat in unique:
-            self.category_combo.addItem(cat, cat)
-        idx = self.category_combo.findText(prev)
-        self.category_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        self.category_combo.blockSignals(False)
+        self.catalog_view_controller.populate_category_filter()
 
     def _restore_category_filter(self, category_name: str):
-        idx = self.category_combo.findText(category_name or "Все")
-        if idx >= 0:
-            self.category_combo.setCurrentIndex(idx)
-        else:
-            self.category_combo.setCurrentIndex(0)
+        self.catalog_view_controller.restore_category_filter(category_name)
 
     def _fill_model_list(self, preview_map_raw=None):
-        if preview_map_raw is None:
-            preview_map = get_preview_paths_for_assets(
-                self.filtered_model_files,
-                db_path=self.catalog_db_path,
-                kind="thumb",
-            )
-        else:
-            preview_map = preview_map_raw
-        preview_root = os.path.normcase(os.path.normpath(get_preview_cache_dir()))
-        load_tree_icons = self.model_list.isVisible()
-        self.model_list.clear()
-        self._model_item_by_path = {}
-        category_roots = {}
-        for file_path in self.filtered_model_files:
-            rel_path = os.path.relpath(file_path, self.current_directory)
-            display_name = os.path.basename(file_path)
-            norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
-            category = self._top_category(file_path)
-            if norm in self.favorite_paths:
-                display_name = f"★ {display_name}"
-            cat_item = category_roots.get(category)
-            if cat_item is None:
-                cat_item = QTreeWidgetItem([category])
-                cat_item.setData(0, Qt.UserRole, "")
-                self.model_list.addTopLevelItem(cat_item)
-                category_roots[category] = cat_item
-
-            item = QTreeWidgetItem([display_name])
-            item.setData(0, Qt.UserRole, file_path)
-            item.setToolTip(0, rel_path)
-            item.setSizeHint(0, QSize(0, self._thumb_size + 10))
-            preview_path = preview_map.get(norm)
-            if preview_path and os.path.isfile(preview_path):
-                preview_norm = os.path.normcase(os.path.normpath(os.path.abspath(preview_path)))
-                if not preview_norm.startswith(preview_root + os.sep):
-                    preview_path = ""
-            if load_tree_icons and preview_path and os.path.isfile(preview_path):
-                self._preview_icon_cache[norm] = preview_path
-                pix = QPixmap(preview_path)
-                icon = QIcon(pix.scaled(self._thumb_size, self._thumb_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                if not icon.isNull():
-                    item.setIcon(0, icon)
-            cat_item.addChild(item)
-            self._model_item_by_path[norm] = item
-
-        for i in range(self.model_list.topLevelItemCount()):
-            self.model_list.topLevelItem(i).setExpanded(True)
-        self._refresh_catalog_dock_items(preview_map_raw=preview_map)
-        self._sync_filters_to_dock()
+        self.catalog_view_controller.fill_model_list(preview_map_raw=preview_map_raw)
 
     def _refresh_catalog_dock_items(self, preview_map_raw=None):
-        if self.catalog_panel is None:
-            return
-        if preview_map_raw is None:
-            preview_map_raw = get_preview_paths_for_assets(
-                self.filtered_model_files,
-                db_path=self.catalog_db_path,
-                kind="thumb",
-            )
-        preview_root = os.path.normcase(os.path.normpath(get_preview_cache_dir()))
-        items, preview_map = self.catalog_controller.build_dock_items(
-            filtered_model_files=self.filtered_model_files,
-            root_directory=self.current_directory,
-            favorite_paths=self.favorite_paths,
-            preview_map_raw=preview_map_raw,
-            preview_root=preview_root,
-            asset_categories_map=self.virtual_catalog_controller.asset_categories_map,
-        )
-        self.catalog_panel.set_items(items, preview_map)
+        self.catalog_view_controller.refresh_catalog_dock_items(preview_map_raw=preview_map_raw)
 
     def _load_model_at_row(self, row):
         if row < 0 or row >= len(self.filtered_model_files):
@@ -1326,90 +1248,25 @@ class MainWindow(QMainWindow):
         self._start_async_model_load(row, file_path)
 
     def _current_selected_path(self):
-        if self.batch_controller.running and self.batch_controller.current_path:
-            return self.batch_controller.current_path
-        if self.catalog_panel is not None:
-            dock_path = self.catalog_panel.current_path()
-            if dock_path:
-                return dock_path
-        if self._selected_model_path:
-            return self._selected_model_path
-        return self.current_file_path or ""
+        return self.catalog_view_controller.current_selected_path()
 
     def _current_model_index(self):
-        path = self._current_selected_path()
-        if not path:
-            return -1
-        try:
-            return self.filtered_model_files.index(path)
-        except ValueError:
-            return -1
+        return self.catalog_view_controller.current_model_index()
 
     def _select_model_by_index(self, index: int):
-        if index < 0 or index >= len(self.filtered_model_files):
-            return
-        path = self.filtered_model_files[index]
-        self._selected_model_path = path
-        norm = os.path.normcase(os.path.normpath(os.path.abspath(path)))
-        item = self._model_item_by_path.get(norm)
-        if item is None:
-            return
-        if self.catalog_panel is not None:
-            self.catalog_panel.set_current_path(path)
-        self.model_list.setCurrentItem(item)
-        self.model_list.scrollToItem(item)
+        self.catalog_view_controller.select_model_by_index(index)
 
     def _open_model_by_path(self, path: str):
-        if not path:
-            return
-        self._selected_model_path = path
-        try:
-            idx = self.filtered_model_files.index(path)
-        except ValueError:
-            # For batch mode we may iterate models outside current filter/category.
-            if self.batch_controller.running:
-                self._start_async_model_load(-1, path)
-            return
-        current_norm = os.path.normcase(os.path.normpath(os.path.abspath(self.current_file_path))) if self.current_file_path else ""
-        target_norm = os.path.normcase(os.path.normpath(os.path.abspath(path)))
-        if current_norm == target_norm:
-            if self.batch_controller.running:
-                self._start_async_model_load(idx, path)
-            else:
-                self._load_model_at_row(idx)
-            return
-        self._select_model_by_index(idx)
+        self.catalog_view_controller.open_model_by_path(path)
 
     def on_selection_changed(self):
-        if self.catalog_panel is not None:
-            item = self.model_list.currentItem()
-            if item is not None:
-                path = item.data(0, Qt.UserRole) or ""
-                if path:
-                    self.catalog_panel.set_current_path(path)
-        row = self._current_model_index()
-        self._update_favorite_button_for_current()
-        self._load_model_at_row(row)
+        self.catalog_view_controller.on_selection_changed()
 
     def show_previous_model(self):
-        if not self.filtered_model_files:
-            return
-        row = self._current_model_index()
-        if row <= 0:
-            row = len(self.filtered_model_files) - 1
-        else:
-            row -= 1
-        self._select_model_by_index(row)
+        self.catalog_view_controller.show_previous_model()
 
     def show_next_model(self):
-        if not self.filtered_model_files:
-            return
-        row = self._current_model_index()
-        if row < 0 or row >= len(self.filtered_model_files) - 1:
-            row = 0
-        else:
-            row += 1
-        self._select_model_by_index(row)
+        self.catalog_view_controller.show_next_model()
 
     def keyPressEvent(self, event):
         key_mappings = {
@@ -1897,294 +1754,109 @@ class MainWindow(QMainWindow):
         self._append_index_status()
 
     def _on_alpha_cutoff_changed(self, value: int):
-        cutoff = value / 100.0
-        self.alpha_cutoff_label.setText(f"{cutoff:.2f}")
-        self.gl_widget.set_alpha_cutoff(cutoff)
-        if self._settings_ready:
-            self.settings.setValue("view/alpha_cutoff_slider", int(value))
+        self.render_settings_controller.on_alpha_cutoff_changed(value)
 
     def _on_alpha_blend_changed(self, value: int):
-        opacity = value / 100.0
-        self.alpha_blend_label.setText(f"{opacity:.2f}")
-        self.gl_widget.set_alpha_blend_opacity(opacity)
-        if self._settings_ready:
-            self.settings.setValue("view/alpha_blend_slider", int(value))
+        self.render_settings_controller.on_alpha_blend_changed(value)
 
     def _on_alpha_mode_changed(self, _value: int):
-        mode = self.alpha_mode_combo.currentData() or "cutout"
-        self.gl_widget.set_alpha_render_mode(mode)
-        is_cutout = mode == "cutout"
-        is_blend = mode == "blend"
-        self.alpha_cutoff_slider.setEnabled(is_cutout)
-        self.alpha_cutoff_label.setEnabled(is_cutout)
-        self.alpha_blend_slider.setEnabled(is_blend)
-        self.alpha_blend_label.setEnabled(is_blend)
-        self.blend_base_alpha_checkbox.setEnabled(is_blend)
-        self.gl_widget.set_use_base_alpha_in_blend(is_blend and self.blend_base_alpha_checkbox.isChecked())
-        self._on_shadows_toggled(self.shadows_checkbox.checkState())
-        if self._settings_ready:
-            self.settings.setValue("view/alpha_mode", mode)
+        self.render_settings_controller.on_alpha_mode_changed(_value)
 
     def _on_blend_base_alpha_changed(self, state: int):
-        enabled = state == Qt.Checked
-        mode = self.alpha_mode_combo.currentData() or "cutout"
-        self.gl_widget.set_use_base_alpha_in_blend(mode == "blend" and enabled)
-        if self._settings_ready:
-            self.settings.setValue("view/blend_base_alpha", bool(enabled))
+        self.render_settings_controller.on_blend_base_alpha_changed(state)
 
     def _on_normal_space_changed(self, _value: int):
-        mode = (self.normal_space_combo.currentData() or "auto") if self.normal_space_combo is not None else "auto"
-        self.gl_widget.set_normal_map_space(mode)
-        if self._settings_ready:
-            self.settings.setValue("view/normal_map_space", str(mode))
-        self._refresh_overlay_data()
+        self.render_settings_controller.on_normal_space_changed(_value)
 
     def _on_projection_changed(self):
-        mode = self.projection_combo.currentData()
-        self.gl_widget.set_projection_mode(mode)
-        if self._settings_ready:
-            self.settings.setValue("view/projection_mode", mode)
-        self._update_status(self._current_model_index())
+        self.render_settings_controller.on_projection_changed()
 
     def _on_render_mode_changed(self):
-        mode = self.render_mode_combo.currentData() or "quality"
-        self.render_mode = mode
-        self.gl_widget.set_fast_mode(mode == "fast")
-        if self._settings_ready:
-            self.settings.setValue("view/render_mode", mode)
-            row = self._current_model_index()
-            if 0 <= row < len(self.filtered_model_files):
-                self._load_model_at_row(row)
+        self.render_settings_controller.on_render_mode_changed()
 
     def _on_auto_collapse_changed(self, value: int):
-        threshold = int(max(0, value))
-        self.auto_collapse_label.setText(str(threshold))
-        self.gl_widget.set_auto_collapse_submesh_threshold(threshold)
-        if self._settings_ready:
-            self.settings.setValue("view/auto_collapse_submeshes", int(threshold))
+        self.render_settings_controller.on_auto_collapse_changed(value)
 
     def _current_normals_policy(self) -> str:
-        return str(self.normals_policy_combo.currentData() or "import")
+        return self.render_settings_controller.current_normals_policy()
 
     def _current_hard_edge_angle(self) -> float:
-        return float(self.normals_hard_angle_slider.value())
+        return self.render_settings_controller.current_hard_edge_angle()
 
     def _on_normals_policy_changed(self, _value: int):
-        policy = self._current_normals_policy()
-        is_hard = policy == "recompute_hard"
-        self.normals_hard_angle_slider.setEnabled(is_hard)
-        self.normals_hard_angle_label.setEnabled(is_hard)
-        if self._settings_ready:
-            self.settings.setValue("view/normals_policy", policy)
-            row = self._current_model_index()
-            if 0 <= row < len(self.filtered_model_files):
-                self._load_model_at_row(row)
+        self.render_settings_controller.on_normals_policy_changed(_value)
 
     def _on_normals_hard_angle_changed(self, value: int):
-        angle = int(max(1, min(180, value)))
-        self.normals_hard_angle_label.setText(f"{angle}°")
-        if self._settings_ready:
-            self.settings.setValue("view/normals_hard_angle", int(angle))
-            if self._current_normals_policy() == "recompute_hard":
-                row = self._current_model_index()
-                if 0 <= row < len(self.filtered_model_files):
-                    self._load_model_at_row(row)
+        self.render_settings_controller.on_normals_hard_angle_changed(value)
 
     def _on_rotate_speed_changed(self, value: int):
-        speed = value / 500.0
-        self.rotate_speed_label.setText(f"{speed:.2f}")
-        self.gl_widget.set_rotate_speed(speed)
-        if self._settings_ready:
-            self.settings.setValue("view/rotate_speed_slider", int(value))
+        self.render_settings_controller.on_rotate_speed_changed(value)
 
     def _on_zoom_speed_changed(self, value: int):
-        speed = value / 100.0
-        self.zoom_speed_label.setText(f"{speed:.2f}")
-        self.gl_widget.set_zoom_speed(speed)
-        if self._settings_ready:
-            self.settings.setValue("view/zoom_speed_slider", int(value))
+        self.render_settings_controller.on_zoom_speed_changed(value)
 
     def _on_ambient_changed(self, value: int):
-        ambient = value / 100.0
-        self.ambient_label.setText(f"{ambient:.2f}")
-        self.gl_widget.set_ambient_strength(ambient)
-        if self._settings_ready:
-            self.settings.setValue("view/ambient_slider", int(value))
+        self.render_settings_controller.on_ambient_changed(value)
 
     def _on_key_light_changed(self, value: int):
-        intensity = value / 10.0
-        self.key_light_label.setText(f"{intensity:.1f}")
-        self.gl_widget.set_key_light_intensity(intensity)
-        if self._settings_ready:
-            self.settings.setValue("view/key_light_slider", int(value))
+        self.render_settings_controller.on_key_light_changed(value)
 
     def _on_fill_light_changed(self, value: int):
-        intensity = value / 10.0
-        self.fill_light_label.setText(f"{intensity:.1f}")
-        self.gl_widget.set_fill_light_intensity(intensity)
-        if self._settings_ready:
-            self.settings.setValue("view/fill_light_slider", int(value))
+        self.render_settings_controller.on_fill_light_changed(value)
 
     def _on_key_light_azimuth_changed(self, value: int):
-        self.key_azimuth_label.setText(f"{int(value)} deg")
-        self.gl_widget.set_key_light_angles(value, self.key_elevation_slider.value())
-        if self._settings_ready:
-            self.settings.setValue("view/key_light_azimuth", int(value))
+        self.render_settings_controller.on_key_light_azimuth_changed(value)
 
     def _on_key_light_elevation_changed(self, value: int):
-        self.key_elevation_label.setText(f"{int(value)} deg")
-        self.gl_widget.set_key_light_angles(self.key_azimuth_slider.value(), value)
-        if self._settings_ready:
-            self.settings.setValue("view/key_light_elevation", int(value))
+        self.render_settings_controller.on_key_light_elevation_changed(value)
 
     def _on_fill_light_azimuth_changed(self, value: int):
-        self.fill_azimuth_label.setText(f"{int(value)} deg")
-        self.gl_widget.set_fill_light_angles(value, self.fill_elevation_slider.value())
-        if self._settings_ready:
-            self.settings.setValue("view/fill_light_azimuth", int(value))
+        self.render_settings_controller.on_fill_light_azimuth_changed(value)
 
     def _on_fill_light_elevation_changed(self, value: int):
-        self.fill_elevation_label.setText(f"{int(value)} deg")
-        self.gl_widget.set_fill_light_angles(self.fill_azimuth_slider.value(), value)
-        if self._settings_ready:
-            self.settings.setValue("view/fill_light_elevation", int(value))
+        self.render_settings_controller.on_fill_light_elevation_changed(value)
 
     def _on_key_azimuth_drag_from_viewport(self, azimuth_value: float):
-        value = int(round(float(azimuth_value)))
-        value = max(self.key_azimuth_slider.minimum(), min(self.key_azimuth_slider.maximum(), value))
-        if self.key_azimuth_slider.value() == value:
-            return
-        # Use normal slider path so label/settings/ui stay synchronized.
-        self.key_azimuth_slider.setValue(value)
+        self.render_settings_controller.on_key_azimuth_drag_from_viewport(azimuth_value)
 
     def _on_shadow_opacity_changed(self, value: int):
-        opacity = value / 100.0
-        self.shadow_opacity_label.setText(f"{opacity:.2f}")
-        self.gl_widget.set_shadow_opacity(opacity)
-        if self._settings_ready:
-            self.settings.setValue("view/shadow_opacity_slider", int(value))
+        self.render_settings_controller.on_shadow_opacity_changed(value)
 
     def _on_shadow_bias_changed(self, value: int):
-        bias = value / 10000.0
-        self.shadow_bias_label.setText(f"{bias:.4f}")
-        self.gl_widget.set_shadow_bias(bias)
-        if self._settings_ready:
-            self.settings.setValue("view/shadow_bias_slider", int(value))
+        self.render_settings_controller.on_shadow_bias_changed(value)
 
     def _on_shadow_softness_changed(self, value: int):
-        softness = value / 100.0
-        self.shadow_softness_label.setText(f"{softness:.2f}")
-        self.gl_widget.set_shadow_softness(softness)
-        if self._settings_ready:
-            self.settings.setValue("view/shadow_softness_slider", int(value))
+        self.render_settings_controller.on_shadow_softness_changed(value)
 
     def _on_shadow_quality_changed(self, _value: int):
-        quality = self.shadow_quality_combo.currentData() or "balanced"
-        self.gl_widget.set_shadow_quality(quality)
-        if self._settings_ready:
-            self.settings.setValue("view/shadow_quality", str(quality))
+        self.render_settings_controller.on_shadow_quality_changed(_value)
 
     def _on_background_brightness_changed(self, value: int):
-        brightness = value / 100.0
-        self.bg_brightness_label.setText(f"{brightness:.2f}")
-        self.gl_widget.set_background_brightness(brightness)
-        if self._settings_ready:
-            self.settings.setValue("view/bg_brightness_slider", int(value))
+        self.render_settings_controller.on_background_brightness_changed(value)
 
     def _on_background_gradient_changed(self, value: int):
-        strength = value / 100.0
-        self.bg_gradient_label.setText(f"{strength:.2f}")
-        self.gl_widget.set_background_gradient_strength(strength)
-        if self._settings_ready:
-            self.settings.setValue("view/bg_gradient_slider", int(value))
+        self.render_settings_controller.on_background_gradient_changed(value)
 
     def _choose_background_color(self):
-        current = QColor(self.settings.value("view/bg_color_hex", "#14233f", type=str))
-        color = QColorDialog.getColor(current, self, "Выбрать цвет фона")
-        if not color.isValid():
-            return
-        self._apply_background_color(color)
-        if self._settings_ready:
-            self.settings.setValue("view/bg_color_hex", color.name())
+        self.render_settings_controller.choose_background_color()
 
     def _apply_background_color(self, color: QColor):
-        self.bg_color_button.setStyleSheet(f"background-color: {color.name()};")
-        self.gl_widget.set_background_color(color.redF(), color.greenF(), color.blueF())
+        self.render_settings_controller.apply_background_color(color)
 
     def _on_theme_changed(self):
-        theme = self.theme_combo.currentData() or "graphite"
-        apply_ui_theme(self, theme)
-        if self._settings_ready:
-            self.settings.setValue("view/ui_theme", theme)
+        self.render_settings_controller.on_theme_changed()
 
     def _on_shadows_toggled(self, state: int):
-        enabled = state == Qt.Checked
-        active = self.gl_widget.set_shadows_enabled(enabled)
-        status = str(self.gl_widget.shadow_status_message or "").strip().lower()
-        if enabled and not active:
-            # During startup GL context may be unavailable yet.
-            # Keep checkbox checked and let OpenGLWidget enable shadows once context is ready.
-            if status == "no context":
-                if self._settings_ready:
-                    self.settings.setValue("view/shadows_enabled", True)
-            else:
-                self.shadows_checkbox.blockSignals(True)
-                self.shadows_checkbox.setChecked(False)
-                self.shadows_checkbox.blockSignals(False)
-                if self._settings_ready:
-                    self.settings.setValue("view/shadows_enabled", False)
-        else:
-            if self._settings_ready:
-                self.settings.setValue("view/shadows_enabled", bool(enabled))
-        self._update_status(self._current_model_index())
+        self.render_settings_controller.on_shadows_toggled(state)
 
     def _sync_projection_combo(self):
-        wanted = "orthographic" if self.gl_widget.projection_mode == "orthographic" else "perspective"
-        index = self.projection_combo.findData(wanted)
-        if index >= 0 and self.projection_combo.currentIndex() != index:
-            self.projection_combo.blockSignals(True)
-            self.projection_combo.setCurrentIndex(index)
-            self.projection_combo.blockSignals(False)
+        self.render_settings_controller.sync_projection_combo()
 
     def _reset_camera_settings(self):
-        self.rotate_speed_slider.setValue(100)
-        self.zoom_speed_slider.setValue(110)
-        self.auto_collapse_slider.setValue(96)
-        self.normals_hard_angle_slider.setValue(60)
-        nidx = self.normals_policy_combo.findData("import")
-        if nidx >= 0:
-            self.normals_policy_combo.setCurrentIndex(nidx)
-        idx = self.projection_combo.findData("perspective")
-        if idx >= 0:
-            self.projection_combo.setCurrentIndex(idx)
-        mode_idx = self.render_mode_combo.findData("quality")
-        if mode_idx >= 0:
-            self.render_mode_combo.setCurrentIndex(mode_idx)
-        self.gl_widget.reset_view()
-        self._sync_projection_combo()
-        self._update_status(self._current_model_index())
+        self.render_settings_controller.reset_camera_settings()
 
     def _reset_light_settings(self):
-        self.ambient_slider.setValue(8)
-        self.key_light_slider.setValue(180)
-        self.fill_light_slider.setValue(100)
-        self.key_azimuth_slider.setValue(42)
-        self.key_elevation_slider.setValue(34)
-        self.fill_azimuth_slider.setValue(-52)
-        self.fill_elevation_slider.setValue(18)
-        self.bg_brightness_slider.setValue(100)
-        self.bg_gradient_slider.setValue(100)
-        self.shadow_opacity_slider.setValue(42)
-        self.shadow_bias_slider.setValue(12)
-        self.shadow_softness_slider.setValue(100)
-        qidx = self.shadow_quality_combo.findData("balanced")
-        if qidx >= 0:
-            self.shadow_quality_combo.setCurrentIndex(qidx)
-        self._apply_background_color(QColor("#14233f"))
-        if self._settings_ready:
-            self.settings.setValue("view/bg_color_hex", "#14233f")
-        self.shadows_checkbox.setChecked(False)
-        self._update_status(self._current_model_index())
+        self.render_settings_controller.reset_light_settings()
 
     def _start_async_model_load(self, row: int, file_path: str):
         self.model_session_controller.start_load(
@@ -2293,27 +1965,13 @@ class MainWindow(QMainWindow):
         self.catalog_ui_controller.apply_model_filters(keep_selection=keep_selection)
 
     def _refresh_favorites_from_db(self):
-        self.favorite_paths = self.catalog_controller.load_favorites(
-            root_directory=self.current_directory,
-            db_path=self.catalog_db_path,
-        )
+        self.catalog_view_controller.refresh_favorites_from_db()
 
     def _toggle_current_favorite(self):
-        path = self._current_selected_path()
-        if not path:
-            return
-        self.catalog_controller.toggle_favorite(path, self.favorite_paths, self.catalog_db_path)
-        self._update_favorite_button_for_current()
-        self._apply_model_filters(keep_selection=True)
-        self._refresh_catalog_events()
+        self.catalog_view_controller.toggle_current_favorite()
 
     def _update_favorite_button_for_current(self):
-        path = self._current_selected_path()
-        norm = os.path.normcase(os.path.normpath(os.path.abspath(path))) if path else ""
-        is_fav = norm in self.favorite_paths
-        self.favorite_toggle_button.setText("★" if is_fav else "☆")
-        if self.catalog_panel is not None:
-            self.catalog_panel.set_favorite_button(is_fav)
+        self.catalog_view_controller.update_favorite_button_for_current()
 
     def _append_index_status(self):
         self.catalog_log_controller.append_index_status()
