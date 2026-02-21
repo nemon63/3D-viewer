@@ -1,94 +1,121 @@
-# Implementation Plan (MVP)
+# Implementation Plan (v3, stability-first)
 
-## Phase 1: Foundation
-1. DB bootstrap from `docs/schema_v1.sql`.
-2. File scanner/indexer (incremental, background thread).
-3. Events (`new/updated/removed`) logging.
+Last update: 2026-02-21
 
-## Phase 2: Catalog UX
-Status: 3/3 complete (MVP).
-1. [x] List with search, date filter, favorites, categories.
-2. [x] Preview cache generation (thumb/cardsheet).
-3. [x] Model card with metadata (MVP format: in-viewport overlay in 3D window).
-3.1 UX format: overlay in 3D viewport, toggle by `F1`.
-3.2 Overlay content: file name, object/material/submesh counts, vertex/triangle counts, UV count, texture candidate count, selected channel textures, alpha/projection/shadow state.
-3.3 Data source: `payload.debug_info` + `submeshes` + current channel assignments from UI.
-3.4 States: hidden by default; auto-refresh on model load and material/channel changes.
-3.5 Performance: no blocking IO in render path; overlay text is prebuilt from current state.
-3.6 Implementation:
-3.6.1 `OpenGLWidget`: `overlay_visible`, `overlay_lines`.
-3.6.2 `OpenGLWidget` API: `set_overlay_lines(lines)`, `set_overlay_visible(visible)`, `toggle_overlay()`.
-3.6.3 `MainWindow`: `QShortcut(Qt.Key_F1, self)` for toggle.
-3.6.4 `MainWindow`: `_refresh_overlay_data()` builds and pushes overlay text lines.
-3.6.5 Overlay rendering path: UI-layer overlay widget above 3D viewport (no changes to shadow pipeline).
-3.7 Acceptance:
-3.7.1 Pressing `F1` toggles overlay instantly.
-3.7.2 Overlay values update after model load and material reassignment.
-3.7.3 Overlay values match debug info and selected textures.
+## EN
 
-## Phase 3: Pipelines + Validation
-1. Parse rules from `docs/profiles.yaml`.
-2. Coverage statuses per pipeline (`ready/partial/missing`).
-3. Validation results panel and filters.
+### A. Guiding principle
+1. Keep the app operational at all times.
+2. Expand functionality incrementally behind clear acceptance criteria.
+3. Prioritize current business pain:
+3.1 Search performance.
+3.2 Animation playback and review flow.
 
-## Phase 4: Requests/Tasks
-1. Analyst request cards + references.
-2. Assignee/status workflow for modelers.
-3. Link tasks to assets and pipeline targets.
+### B. Sequential stages
+1. Stage 0 (hardening baseline, mandatory before major changes).
+1.1 Freeze and document current behavior.
+1.2 Add smoke tests for startup, scan, load model, filter, preview batch.
+1.3 Add rollback-safe branch and migration checkpoints.
 
-## Phase 5: Export
-1. Selected assets queue.
-2. Export to folder / zip-per-model / single zip.
-3. Manifest generation and screenshots.
+2. Stage 1 (Search responsiveness, highest priority).
+2.1 Add debounce to text filter (`200-300ms`).
+2.2 Remove hidden duplicate list rebuild (single source for catalog rendering).
+2.3 Keep preview map cache in memory during filtering.
+2.4 Add incremental UI update path for filtered results.
+Acceptance:
+search remains interactive on large folders.
 
-## Phase 6: Integrations
-1. Add optional YouTrack adapter.
-2. Sync local request <-> external issue.
+3. Stage 2 (Animation MVP, second highest priority).
+3.1 Detect animated assets in scan/index.
+3.2 Extract clip metadata (name, fps, duration, frame range).
+3.3 Add playback controls (play/pause/loop/scrub/speed).
+3.4 Add animation review statuses:
+`new`, `in_review`, `approved`, `rejected`.
+3.5 Add animation events:
+`animation_added`, `animation_opened`, `animation_reviewed`, `animation_approved`, `animation_rejected`.
+Acceptance:
+new animations are visible and reviewable in app.
 
+4. Stage 3 (Identity, access, accountability).
+4.1 Add users and sessions model.
+4.2 Implement role-based action permissions.
+4.3 Log user-aware events for open/download/export/review.
+Acceptance:
+all key operations are attributable to user and timestamp.
 
-# План реализации (MVP)
+5. Stage 4 (Delivery workflow).
+5.1 Add shortlist basket.
+5.2 Add package export wizard (folder / zip-per-asset / single zip).
+5.3 Generate manifest and screenshots.
+5.4 Record export/download jobs and results.
 
-## Этап 1: Основа
-1. Инициализация базы данных из `docs/schema_v1.sql`.
-2. Сканер/индексатор файлов (инкрементально, в фоновом потоке).
-3. Логирование событий (`new/updated/removed`).
+6. Stage 5 (Requests and integrations).
+6.1 Activate request/task UI from schema entities.
+6.2 Link requests to assets and pipeline targets.
+6.3 Optional YouTrack adapter under feature flag.
 
-## Этап 2: UX каталога
-Статус: 3/3 выполнено (MVP).
-1. [x] Список с поиском, фильтром по дате, избранным и категориями.
-2. [x] Генерация кэша предпросмотра (миниатюры/карточки).
-3. [x] Карточка модели с метаданными (MVP-формат: оверлей в окне 3D).
-3.1 Формат UX: оверлей в 3D viewport, переключение по `F1`.
-3.2 Содержимое оверлея: имя файла, число объектов/материалов/сабмешей, число вершин/треугольников, UV count, число кандидатов текстур, выбранные текстуры по каналам, состояние alpha/projection/shadow.
-3.3 Источник данных: `payload.debug_info` + `submeshes` + текущие назначения каналов из UI.
-3.4 Состояния: по умолчанию скрыт; автообновление при загрузке модели и при смене материалов/каналов.
-3.5 Производительность: без блокирующего IO в рендер-пути; текст оверлея формируется заранее из текущего состояния.
-3.6 Реализация:
-3.6.1 `OpenGLWidget`: `overlay_visible`, `overlay_lines`.
-3.6.2 API `OpenGLWidget`: `set_overlay_lines(lines)`, `set_overlay_visible(visible)`, `toggle_overlay()`.
-3.6.3 `MainWindow`: `QShortcut(Qt.Key_F1, self)` для переключения.
-3.6.4 `MainWindow`: `_refresh_overlay_data()` собирает и отправляет строки оверлея.
-3.6.5 Отрисовка оверлея: UI-слой поверх 3D viewport (без изменений shadow pipeline).
-3.7 Критерии приемки:
-3.7.1 Нажатие `F1` мгновенно переключает оверлей.
-3.7.2 Значения оверлея обновляются после загрузки модели и смены материалов.
-3.7.3 Значения оверлея совпадают с debug info и выбранными текстурами.
+### C. Cross-cutting constraints
+1. Schema migrations must be explicit (v1 -> v2 -> ...).
+2. No blocking operations on UI thread.
+3. Keep backward compatibility with current catalog where feasible.
+4. Continue moving business logic out of `MainWindow`.
 
-## Этап 3: Конвейеры и валидация
-1. Разбор правил из `docs/profiles.yaml`.
-2. Статусы покрытия по конвейерам (`ready/partial/missing`).
-3. Панель результатов валидации и фильтры.
+---
 
-## Этап 4: Запросы/задачи
-1. Карточки запросов аналитика + ссылки.
-2. Workflow назначения исполнителей и статусов для моделлеров.
-3. Привязка задач к ассетам и целям конвейера.
+## RU
 
-## Этап 5: Экспорт
-1. Очередь выбранных ассетов.
-2. Экспорт в папку / zip на модель / единый zip.
-3. Генерация манифеста и скриншотов.
+### A. Базовый принцип
+1. Программа должна оставаться рабочей на каждом этапе.
+2. Расширение идет инкрементально, по четким критериям приемки.
+3. Текущие главные боли:
+3.1 Производительность поиска.
+3.2 Проигрывание и ревью анимаций.
 
-## Этап 6: Интеграции
-1. Добавление опционального адаптера YouTrack.
-2. Синхронизация локальных запросов с внешними задачами.
+### B. Последовательные этапы
+1. Этап 0 (укрепление базы, обязателен перед крупными изменениями).
+1.1 Зафиксировать текущее поведение и baseline.
+1.2 Добавить smoke-тесты: запуск, scan, загрузка модели, фильтр, batch-превью.
+1.3 Подготовить безопасные точки отката и чекпоинты миграций.
+
+2. Этап 1 (поиск и отзывчивость, высший приоритет).
+2.1 Debounce для поиска (`200-300ms`).
+2.2 Убрать rebuild скрытого дублирующего списка (единый источник каталога).
+2.3 Держать preview map в памяти на время фильтрации.
+2.4 Добавить инкрементальный путь обновления списка.
+Критерий приемки:
+поиск остается отзывчивым на больших каталогах.
+
+3. Этап 2 (Animation MVP, второй приоритет).
+3.1 Детект анимационных ассетов при scan/index.
+3.2 Извлечение метаданных клипов (имя, fps, длительность, диапазон кадров).
+3.3 Контролы проигрывания (play/pause/loop/scrub/скорость).
+3.4 Статусы ревью:
+`new`, `in_review`, `approved`, `rejected`.
+3.5 События по анимациям:
+`animation_added`, `animation_opened`, `animation_reviewed`, `animation_approved`, `animation_rejected`.
+Критерий приемки:
+новые анимации видны и проходят ревью в приложении.
+
+4. Этап 3 (идентичность, доступ, ответственность).
+4.1 Добавить модель пользователей и сессий.
+4.2 Реализовать роли и права на действия.
+4.3 Логировать пользовательские события open/download/export/review.
+Критерий приемки:
+каждая ключевая операция имеет автора и время.
+
+5. Этап 4 (поток выдачи ассетов).
+5.1 Добавить корзину отбора.
+5.2 Добавить мастер экспорта (folder / zip-per-asset / single zip).
+5.3 Генерировать манифест и скриншоты.
+5.4 Логировать export/download jobs и результат.
+
+6. Этап 5 (заявки и интеграции).
+6.1 Подключить UI заявок/задач из сущностей схемы.
+6.2 Связать заявки с ассетами и целевыми пайплайнами.
+6.3 Опциональный адаптер YouTrack через feature flag.
+
+### C. Сквозные ограничения
+1. Миграции схемы должны быть явными (v1 -> v2 -> ...).
+2. Никаких блокирующих операций в UI-потоке.
+3. По возможности сохранять совместимость с текущим каталогом.
+4. Продолжать разгружать `MainWindow` от бизнес-логики.

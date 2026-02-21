@@ -1,42 +1,75 @@
-# Требования к моделям, материалам и текстурам
+# Model, Material, and Texture Requirements (aligned)
 
-Документ фиксирует минимальные правила, чтобы назначение материалов было детерминированным, а валидация под пайплайны работала без ложных `ready`.
+Last update: 2026-02-21
 
-## 1. Геометрия и материалы
+## EN
 
-1. Модель должна хранить назначение материала на полигонах (FBX `LayerElementMaterial`: `ByPolygon` или `AllSame`).
-2. Каждый полигон должен иметь валидный индекс материала (`>= 0`) или явный fallback-материал.
-3. Имена материалов в одной модели должны быть уникальными.
-4. Материал не должен использоваться как "сборный" для разных логических поверхностей с разными наборами карт.
+### 1. Geometry and material assignment
+1. Mesh must preserve polygon-to-material assignment in source files.
+2. Each polygon must map to a valid material index or explicit fallback.
+3. Material names inside one asset should be stable and unique.
+4. Avoid one shared material for unrelated surfaces with different map sets.
 
-## 2. Имена и наборы текстур
+### 2. Texture naming conventions
+1. Use one prefix per material set:
+`wood1_dif`, `wood1_met`, `wood1_rough`, `wood1_nml`.
+2. Different materials must use different prefixes.
+3. Recommended channel suffixes:
+3.1 BaseColor: `dif`, `diff`, `diffuse`, `albedo`, `basecolor`.
+3.2 Metal: `met`, `metal`, `metallic`.
+3.3 Roughness: `rough`, `rgh`, `roughness`.
+3.4 Normal: `nml`, `nrm`, `normal`.
+4. Avoid ambiguous names like `tex_01.png`.
 
-1. Набор карт для одного материала должен иметь общий префикс:
-   `wood1_dif`, `wood1_met`, `wood1_rough`, `wood1_nml`.
-2. Для разных материалов префиксы должны отличаться:
-   `wood1_*` и `window_*`, а не смешанный `material_*`.
+### 3. Multi-material rules in current viewer
+1. Per-material overrides are supported and should be preferred.
+2. Global override is for deliberate preview/debug only.
+3. Validation readiness is per required channel coverage, not only “any texture exists”.
+
+### 4. Alpha and surface behavior
+1. If alpha is used for cutout/blend, BaseColor alpha must be intentional and clean.
+2. Two-sided should be enabled only for assets that need it (foliage, cards, thin shells).
+3. Normal map space should be explicitly validated for Unity/Unreal conventions.
+
+### 5. Import checklist
+1. Every material has at least BaseColor or documented reason why not.
+2. Material-to-texture mapping is deterministic and non-overlapping.
+3. Exported file preserves material count and names from DCC.
+4. Texture paths remain valid after moving project root.
+
+---
+
+## RU
+
+### 1. Геометрия и назначение материалов
+1. Меш должен сохранять назначение полигонов на материалы.
+2. Каждый полигон должен иметь валидный индекс материала или fallback.
+3. Имена материалов в ассете должны быть стабильными и уникальными.
+4. Не использовать один материал для разных логических поверхностей.
+
+### 2. Нейминг текстур
+1. Для одного material set использовать общий префикс:
+`wood1_dif`, `wood1_met`, `wood1_rough`, `wood1_nml`.
+2. Для разных материалов использовать разные префиксы.
 3. Рекомендуемые суффиксы каналов:
-   - BaseColor: `dif`, `diff`, `diffuse`, `albedo`, `basecolor`
-   - Metal: `met`, `metal`, `metallic`
-   - Roughness: `rough`, `rgh`, `roughness`
-   - Normal: `nml`, `nrm`, `normal`
-4. Не использовать неоднозначные имена без каналов (например, `tex_01.png`).
+3.1 BaseColor: `dif`, `diff`, `diffuse`, `albedo`, `basecolor`.
+3.2 Metal: `met`, `metal`, `metallic`.
+3.3 Roughness: `rough`, `rgh`, `roughness`.
+3.4 Normal: `nml`, `nrm`, `normal`.
+4. Избегать неоднозначных имён типа `tex_01.png`.
 
-## 3. Путь и формат файлов
+### 3. Правила для multi-material в текущем viewer
+1. Предпочтительно назначение по выбранному материалу.
+2. Глобальный override использовать осознанно для предпросмотра/отладки.
+3. Готовность валидации оценивается по покрытию обязательных каналов.
 
-1. Текстуры должны быть доступны по относительным/корректным путям после переноса проекта.
-2. Допустимые форматы и лимиты берутся из `docs/profiles.yaml`.
-3. Для production-проверок имена файлов должны соответствовать regex из `docs/profiles.yaml` (`validation.naming.*`).
+### 4. Alpha и поверхность
+1. Если alpha используется для cutout/blend, alpha в BaseColor должна быть корректной.
+2. Two-sided включать только там, где это действительно нужно.
+3. Normal map space проверять явно для Unity/Unreal.
 
-## 4. Правила для multi-material моделей
-
-1. В UI назначение карт делается по выбранному материалу (`Material`), а не только глобально.
-2. Глобальный override допустим только как осознанный режим предпросмотра.
-3. Валидация пайплайна считается по каждому материалу: если хотя бы один материал не закрывает обязательные каналы, пайплайн не `ready`.
-
-## 5. Минимальный чек перед импортом
-
-1. Проверить, что у каждого материала есть свой набор (минимум `basecolor`).
-2. Проверить, что имена наборов не пересекаются между материалами.
-3. Проверить, что в DCC (Houdini/Maya/Blender) полигоны действительно сидят на ожидаемых материалах.
-4. Проверить, что после экспорта FBX имена материалов и число материалов не изменились.
+### 5. Чек-лист перед импортом
+1. У каждого материала есть минимум BaseColor или понятная причина отсутствия.
+2. Сопоставление материал -> текстуры детерминировано и не пересекается.
+3. После экспорта сохраняются число и имена материалов из DCC.
+4. Пути к текстурам остаются валидными после переноса корня проекта.
