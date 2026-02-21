@@ -27,6 +27,8 @@ def init_catalog_db(db_path=None):
         conn.execute("PRAGMA foreign_keys=ON;")
         with open(schema_path, "r", encoding="utf-8") as f:
             conn.executescript(f.read())
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_category_id ON assets(category_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_categories_parent_id ON categories(parent_id)")
         conn.commit()
     finally:
         conn.close()
@@ -414,6 +416,180 @@ def set_asset_texture_overrides(source_path, overrides, db_path=None):
         conn.commit()
     finally:
         conn.close()
+
+
+def get_categories_tree(db_path=None):
+    db_path = db_path or get_default_db_path()
+    if not os.path.isfile(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT id, name, parent_id FROM categories ORDER BY COALESCE(parent_id, 0), lower(name)"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "id": int(r["id"]),
+            "name": str(r["name"] or ""),
+            "parent_id": (int(r["parent_id"]) if r["parent_id"] is not None else None),
+        }
+        for r in rows
+    ]
+
+
+def create_category(name: str, parent_id=None, db_path=None):
+    db_path = init_catalog_db(db_path)
+    text = str(name or "").strip()
+    if not text:
+        raise RuntimeError("Category name is empty")
+    now = _utc_now_iso()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA foreign_keys=ON;")
+        cur = conn.execute(
+            "INSERT INTO categories(name, parent_id) VALUES(?, ?)",
+            (text, int(parent_id) if parent_id else None),
+        )
+        category_id = int(cur.lastrowid)
+        _insert_event(
+            conn,
+            None,
+            "category_created",
+            {"category_id": category_id, "name": text, "parent_id": (int(parent_id) if parent_id else None)},
+            now,
+        )
+        conn.commit()
+        return category_id
+    except sqlite3.IntegrityError as exc:
+        raise RuntimeError(f"Category already exists: {text}") from exc
+    finally:
+        conn.close()
+
+
+def rename_category(category_id: int, new_name: str, db_path=None):
+    db_path = init_catalog_db(db_path)
+    cid = int(category_id)
+    text = str(new_name or "").strip()
+    if not text:
+        raise RuntimeError("Category name is empty")
+    now = _utc_now_iso()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA foreign_keys=ON;")
+        row = conn.execute("SELECT id, parent_id, name FROM categories WHERE id=?", (cid,)).fetchone()
+        if row is None:
+            raise RuntimeError("Category not found")
+        conn.execute("UPDATE categories SET name=? WHERE id=?", (text, cid))
+        _insert_event(
+            conn,
+            None,
+            "category_renamed",
+            {"category_id": cid, "old_name": str(row["name"] or ""), "new_name": text, "parent_id": row["parent_id"]},
+            now,
+        )
+        conn.commit()
+    except sqlite3.IntegrityError as exc:
+        raise RuntimeError(f"Category already exists: {text}") from exc
+    finally:
+        conn.close()
+
+
+def delete_category(category_id: int, db_path=None):
+    db_path = init_catalog_db(db_path)
+    cid = int(category_id)
+    now = _utc_now_iso()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA foreign_keys=ON;")
+        rows = conn.execute("SELECT id, parent_id, name FROM categories").fetchall()
+        if not rows:
+            return
+        children = {}
+        names = {}
+        for r in rows:
+            rid = int(r["id"])
+            names[rid] = str(r["name"] or "")
+            parent = int(r["parent_id"]) if r["parent_id"] is not None else None
+            children.setdefault(parent, []).append(rid)
+        if cid not in names:
+            return
+        to_delete = []
+        stack = [cid]
+        while stack:
+            cur = stack.pop()
+            to_delete.append(cur)
+            stack.extend(children.get(cur, []))
+        placeholders = ",".join(["?"] * len(to_delete))
+        conn.execute(f"UPDATE assets SET category_id=NULL WHERE category_id IN ({placeholders})", to_delete)
+        conn.execute(f"DELETE FROM categories WHERE id IN ({placeholders})", to_delete)
+        _insert_event(
+            conn,
+            None,
+            "category_deleted",
+            {"category_id": cid, "name": names.get(cid, ""), "deleted_ids": to_delete},
+            now,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_asset_category(source_path: str, category_id=None, db_path=None):
+    db_path = init_catalog_db(db_path)
+    if not source_path:
+        return
+    source_path = os.path.abspath(source_path)
+    now = _utc_now_iso()
+    category_value = int(category_id) if category_id else None
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA foreign_keys=ON;")
+        asset_id = _ensure_asset_id(conn, source_path, now)
+        conn.execute("UPDATE assets SET category_id=?, updated_at=?, last_seen_at=? WHERE id=?", (category_value, now, now, asset_id))
+        _insert_event(
+            conn,
+            asset_id,
+            "asset_category_set",
+            {"path": source_path, "category_id": category_value},
+            now,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_asset_category_map(source_paths, db_path=None):
+    db_path = db_path or get_default_db_path()
+    if not os.path.isfile(db_path) or not source_paths:
+        return {}
+    normalized = [os.path.abspath(p) for p in source_paths if p]
+    if not normalized:
+        return {}
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        placeholders = ",".join(["?"] * len(normalized))
+        rows = conn.execute(
+            f"SELECT source_path, category_id FROM assets WHERE source_path IN ({placeholders})",
+            normalized,
+        ).fetchall()
+    finally:
+        conn.close()
+    out = {}
+    for row in rows:
+        path = row["source_path"] or ""
+        if not path:
+            continue
+        norm = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+        out[norm] = (int(row["category_id"]) if row["category_id"] is not None else None)
+    return out
 
 
 def _load_existing_assets(conn, root):
