@@ -438,6 +438,8 @@ class OpenGLWidget(QOpenGLWidget):
         self.last_texture_paths = {ch: "" for ch in ALL_CHANNELS}
         self.channel_overrides = {ch: None for ch in ALL_CHANNELS}
         self.material_channel_overrides = {}
+        self.two_sided_global_override = False
+        self.material_two_sided_overrides = {}
         self.texture_cache = {}
         self.texture_alpha_cache = {}
         self.base_texture_has_alpha = False
@@ -597,6 +599,8 @@ class OpenGLWidget(QOpenGLWidget):
             self.last_texture_sets = {}
             self.submeshes = []
             self.material_channel_overrides = {}
+            self.material_two_sided_overrides = {}
+            self.two_sided_global_override = False
             self.last_debug_info = {}
             self.model_center = np.array([0.0, 0.0, 0.0], dtype=np.float32)
             self.model_translate = np.array([0.0, 0.0, 0.0], dtype=np.float32)
@@ -618,6 +622,8 @@ class OpenGLWidget(QOpenGLWidget):
             self.last_texture_paths = {ch: "" for ch in ALL_CHANNELS}
             self.channel_overrides = {ch: None for ch in ALL_CHANNELS}
             self.material_channel_overrides = {}
+            self.material_two_sided_overrides = {}
+            self.two_sided_global_override = False
             self._compute_model_bounds()
 
             if self.texcoords.size > 0 and not self.submeshes:
@@ -645,6 +651,8 @@ class OpenGLWidget(QOpenGLWidget):
             self.last_texture_sets = {}
             self.submeshes = []
             self.material_channel_overrides = {}
+            self.material_two_sided_overrides = {}
+            self.two_sided_global_override = False
             self.last_debug_info = {}
             self.model_center = np.array([0.0, 0.0, 0.0], dtype=np.float32)
             self.model_translate = np.array([0.0, 0.0, 0.0], dtype=np.float32)
@@ -749,18 +757,18 @@ class OpenGLWidget(QOpenGLWidget):
                     "metal": self._default_channel_swizzle(CHANNEL_METAL, global_paths.get(CHANNEL_METAL, "")),
                     "roughness": self._default_channel_swizzle(CHANNEL_ROUGH, global_paths.get(CHANNEL_ROUGH, "")),
                 }
-                draw_entries.append((self.indices, tex_ids, has_alpha, swizzles))
+                draw_entries.append((self.indices, tex_ids, has_alpha, swizzles, ""))
             elif self.submeshes:
                 for submesh in self.submeshes:
                     tex_ids, has_alpha, swizzles = self._resolve_submesh_textures(submesh, effective_fast_mode=effective_fast_mode)
-                    draw_entries.append((submesh["indices"], tex_ids, has_alpha, swizzles))
+                    draw_entries.append((submesh["indices"], tex_ids, has_alpha, swizzles, str(submesh.get("material_uid") or "")))
             else:
                 global_paths = self.get_effective_texture_paths()
                 swizzles = {
                     "metal": self._default_channel_swizzle(CHANNEL_METAL, global_paths.get(CHANNEL_METAL, "")),
                     "roughness": self._default_channel_swizzle(CHANNEL_ROUGH, global_paths.get(CHANNEL_ROUGH, "")),
                 }
-                draw_entries.append((self.indices, self.texture_ids, self.base_texture_has_alpha, swizzles))
+                draw_entries.append((self.indices, self.texture_ids, self.base_texture_has_alpha, swizzles, ""))
 
             if self.alpha_render_mode == "blend":
                 opaque_entries = []
@@ -774,36 +782,48 @@ class OpenGLWidget(QOpenGLWidget):
                     else:
                         opaque_entries.append(entry)
 
-                for draw_indices, tex_ids, has_alpha, swizzles in opaque_entries:
+                for draw_indices, tex_ids, has_alpha, swizzles, material_uid in opaque_entries:
+                    if self.get_effective_two_sided(material_uid):
+                        glDisable(GL_CULL_FACE)
+                    else:
+                        glEnable(GL_CULL_FACE)
+                        glCullFace(GL_BACK)
                     self._set_material_uniforms(tex_ids, has_alpha, swizzles, effective_fast_mode=effective_fast_mode)
                     self._draw_mesh_indices(draw_indices)
+                glDisable(GL_CULL_FACE)
 
                 if transparent_entries:
                     glEnable(GL_BLEND)
                     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-                    # Two-sided rendering for alpha-blended geometry:
-                    # first back faces, then front faces for more stable composition.
-                    glEnable(GL_CULL_FACE)
-                    glCullFace(GL_FRONT)
-                    for draw_indices, tex_ids, has_alpha, swizzles in transparent_entries:
-                        self._set_material_uniforms(tex_ids, has_alpha, swizzles, effective_fast_mode=effective_fast_mode)
-                        self._draw_mesh_indices(draw_indices)
-                    glCullFace(GL_BACK)
-                    for draw_indices, tex_ids, has_alpha, swizzles in transparent_entries:
-                        self._set_material_uniforms(tex_ids, has_alpha, swizzles, effective_fast_mode=effective_fast_mode)
-                        self._draw_mesh_indices(draw_indices)
+                    for draw_indices, tex_ids, has_alpha, swizzles, material_uid in transparent_entries:
+                        two_sided = self.get_effective_two_sided(material_uid)
+                        if two_sided:
+                            # Two-sided rendering for alpha-blended geometry:
+                            # first back faces, then front faces for more stable composition.
+                            glEnable(GL_CULL_FACE)
+                            glCullFace(GL_FRONT)
+                            self._set_material_uniforms(tex_ids, has_alpha, swizzles, effective_fast_mode=effective_fast_mode)
+                            self._draw_mesh_indices(draw_indices)
+                            glCullFace(GL_BACK)
+                            self._set_material_uniforms(tex_ids, has_alpha, swizzles, effective_fast_mode=effective_fast_mode)
+                            self._draw_mesh_indices(draw_indices)
+                        else:
+                            glEnable(GL_CULL_FACE)
+                            glCullFace(GL_BACK)
+                            self._set_material_uniforms(tex_ids, has_alpha, swizzles, effective_fast_mode=effective_fast_mode)
+                            self._draw_mesh_indices(draw_indices)
                     glDisable(GL_CULL_FACE)
                     glDisable(GL_BLEND)
             else:
-                use_cutout_culling = effective_fast_mode and self.alpha_render_mode == "cutout"
-                if use_cutout_culling:
-                    glEnable(GL_CULL_FACE)
-                    glCullFace(GL_BACK)
-                for draw_indices, tex_ids, has_alpha, swizzles in draw_entries:
+                for draw_indices, tex_ids, has_alpha, swizzles, material_uid in draw_entries:
+                    if self.get_effective_two_sided(material_uid):
+                        glDisable(GL_CULL_FACE)
+                    else:
+                        glEnable(GL_CULL_FACE)
+                        glCullFace(GL_BACK)
                     self._set_material_uniforms(tex_ids, has_alpha, swizzles, effective_fast_mode=effective_fast_mode)
                     self._draw_mesh_indices(draw_indices)
-                if use_cutout_culling:
-                    glDisable(GL_CULL_FACE)
+                glDisable(GL_CULL_FACE)
         finally:
             self._unbind_texture_units()
             glUseProgram(0)
@@ -1346,6 +1366,20 @@ class OpenGLWidget(QOpenGLWidget):
     def set_auto_collapse_submesh_threshold(self, value: int):
         self.auto_collapse_submesh_threshold = max(0, int(value))
         self.update()
+
+    def set_two_sided(self, enabled: bool, material_uid: str = ""):
+        uid = str(material_uid or "").strip()
+        if uid and uid != "__global__":
+            self.material_two_sided_overrides[uid] = bool(enabled)
+        else:
+            self.two_sided_global_override = bool(enabled)
+        self.update()
+
+    def get_effective_two_sided(self, material_uid: str = "") -> bool:
+        uid = str(material_uid or "").strip()
+        if uid and uid in self.material_two_sided_overrides:
+            return bool(self.material_two_sided_overrides.get(uid))
+        return bool(self.two_sided_global_override)
 
     def _draw_mesh_positions_only(self):
         glEnableClientState(GL_VERTEX_ARRAY)
@@ -1911,6 +1945,8 @@ class OpenGLWidget(QOpenGLWidget):
         self.last_texture_paths = {ch: "" for ch in ALL_CHANNELS}
         self.channel_overrides = {ch: None for ch in ALL_CHANNELS}
         self.material_channel_overrides = {}
+        self.material_two_sided_overrides = {}
+        self.two_sided_global_override = False
         self.last_texture_path = ""
 
     def _compute_model_bounds(self):

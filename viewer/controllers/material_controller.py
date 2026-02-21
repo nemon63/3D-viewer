@@ -152,7 +152,21 @@ class MaterialController:
         if material_overrides:
             payload["materials"] = material_overrides
 
-        if "global" not in payload and "materials" not in payload:
+        payload["two_sided_global"] = bool(getattr(gl_widget, "two_sided_global_override", False))
+        material_two_sided = {}
+        for material_uid, value in (getattr(gl_widget, "material_two_sided_overrides", {}) or {}).items():
+            if not material_uid:
+                continue
+            material_two_sided[str(material_uid)] = bool(value)
+        if material_two_sided:
+            payload["materials_two_sided"] = material_two_sided
+
+        if (
+            "global" not in payload
+            and "materials" not in payload
+            and not payload.get("two_sided_global", False)
+            and "materials_two_sided" not in payload
+        ):
             return {}
         return payload
 
@@ -197,3 +211,14 @@ class MaterialController:
                     if not isinstance(value, str):
                         continue
                     gl_widget.apply_texture_path(channel, value, material_uid=str(material_uid))
+
+        two_sided_global = payload.get("two_sided_global") if isinstance(payload, dict) else None
+        if isinstance(two_sided_global, bool):
+            gl_widget.set_two_sided(two_sided_global, material_uid="")
+
+        material_two_sided = payload.get("materials_two_sided") if isinstance(payload, dict) else None
+        if isinstance(material_two_sided, dict):
+            for material_uid, enabled in material_two_sided.items():
+                if not material_uid:
+                    continue
+                gl_widget.set_two_sided(bool(enabled), material_uid=str(material_uid))

@@ -266,6 +266,9 @@ class MainWindow(QMainWindow):
         reset_overrides_button = QPushButton("Сбросить overrides", self)
         reset_overrides_button.clicked.connect(self._reset_texture_overrides_for_current)
         material_layout.addRow(reset_overrides_button)
+        self.two_sided_checkbox = QCheckBox("Two-sided (для выбранного Material)", self)
+        self.two_sided_checkbox.stateChanged.connect(self._on_two_sided_changed)
+        material_layout.addRow(self.two_sided_checkbox)
 
         self.alpha_cutoff_label = QLabel("0.50", self)
         self.alpha_cutoff_slider = QSlider(Qt.Horizontal, self)
@@ -1379,6 +1382,7 @@ class MainWindow(QMainWindow):
             self._syncing_material_ui = False
 
         self._refresh_material_channel_controls()
+        self._refresh_two_sided_control()
 
     def _material_targets_from_submeshes(self):
         return self.material_controller.material_targets_from_submeshes(self.gl_widget.submeshes or [])
@@ -1502,6 +1506,7 @@ class MainWindow(QMainWindow):
         if self._syncing_material_ui:
             return
         self._refresh_material_channel_controls()
+        self._refresh_two_sided_control()
         self._update_status(self._current_model_index())
         self._refresh_overlay_data()
         self._refresh_validation_data()
@@ -1538,9 +1543,27 @@ class MainWindow(QMainWindow):
             self.material_controller.apply_texture_overrides_payload(payload, self.gl_widget)
         finally:
             self._restoring_texture_overrides = False
+        self._refresh_two_sided_control()
 
     def _on_material_channel_changed(self, channel):
         self._apply_channel_texture(channel)
+
+    def _refresh_two_sided_control(self):
+        if not hasattr(self, "two_sided_checkbox") or self.two_sided_checkbox is None:
+            return
+        material_uid = self._selected_material_uid()
+        enabled = self.gl_widget.get_effective_two_sided(material_uid=material_uid)
+        self.two_sided_checkbox.blockSignals(True)
+        self.two_sided_checkbox.setChecked(bool(enabled))
+        self.two_sided_checkbox.blockSignals(False)
+
+    def _on_two_sided_changed(self, state: int):
+        material_uid = self._selected_material_uid()
+        enabled = state == Qt.Checked
+        self.gl_widget.set_two_sided(enabled, material_uid=material_uid)
+        self._persist_texture_overrides_for_current()
+        self._update_status(self._current_model_index())
+        self._refresh_overlay_data()
 
     def _apply_preview_channel(self):
         channel = self.preview_channel_combo.currentData()
