@@ -1,4 +1,3 @@
-import json
 import os
 import html
 from PyQt5.QtCore import QSettings, QSize, Qt, QTimer
@@ -7,7 +6,6 @@ from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
-    QDialog,
     QDockWidget,
     QColorDialog,
     QFileDialog,
@@ -16,7 +14,6 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
     QMessageBox,
     QMainWindow,
     QPushButton,
@@ -36,14 +33,15 @@ from viewer.ui.theme import apply_ui_theme
 from viewer.controllers.batch_preview_controller import BatchPreviewController
 from viewer.controllers.catalog_index_controller import CatalogIndexController
 from viewer.controllers.catalog_controller import CatalogController
+from viewer.controllers.catalog_log_controller import CatalogLogController
 from viewer.controllers.catalog_ui_controller import CatalogUiController
 from viewer.controllers.directory_scan_controller import DirectoryScanController
 from viewer.controllers.material_controller import MaterialController
 from viewer.controllers.model_session_controller import ModelSessionController
 from viewer.controllers.virtual_catalog_controller import VirtualCatalogController
+from viewer.controllers.workspace_ui_controller import WorkspaceUiController
 from viewer.services.catalog_db import (
     get_preview_paths_for_assets,
-    get_recent_events,
     init_catalog_db,
 )
 from viewer.services.pipeline_validation import (
@@ -112,8 +110,10 @@ class MainWindow(QMainWindow):
         self._syncing_virtual_category = False
         self.main_toolbar = None
         self.catalog_controller = CatalogController()
+        self.catalog_log_controller = CatalogLogController(self)
         self.catalog_ui_controller = CatalogUiController(self)
         self.virtual_catalog_controller = VirtualCatalogController()
+        self.workspace_ui_controller = WorkspaceUiController(self)
         self.material_controller = MaterialController(self.material_channels)
         self.directory_scan_controller = DirectoryScanController(self)
         self.directory_scan_controller.scanFinished.connect(self._on_directory_scan_finished)
@@ -1131,37 +1131,10 @@ class MainWindow(QMainWindow):
         )
 
     def _restore_workspace_state(self):
-        try:
-            geom = self.settings.value("workspace/geometry")
-            if geom:
-                self.restoreGeometry(geom)
-            state = self.settings.value("workspace/state")
-            if state:
-                self.restoreState(state, self.WORKSPACE_STATE_VERSION)
-            tab_idx = self.settings.value("workspace/controls_tab_index", 0, type=int)
-            if self.controls_tabs is not None and 0 <= tab_idx < self.controls_tabs.count():
-                self.controls_tabs.setCurrentIndex(tab_idx)
-            catalog_visible = self.settings.value("workspace/catalog_visible", True, type=bool)
-            settings_visible = self.settings.value("workspace/settings_visible", True, type=bool)
-            if self.catalog_dock is not None:
-                self.catalog_dock.setVisible(bool(catalog_visible))
-            if self.settings_dock is not None:
-                self.settings_dock.setVisible(bool(settings_visible))
-        except Exception:
-            pass
+        self.workspace_ui_controller.restore_workspace_state()
 
     def _save_workspace_state(self):
-        try:
-            self.settings.setValue("workspace/geometry", self.saveGeometry())
-            self.settings.setValue("workspace/state", self.saveState(self.WORKSPACE_STATE_VERSION))
-            if self.controls_tabs is not None:
-                self.settings.setValue("workspace/controls_tab_index", int(self.controls_tabs.currentIndex()))
-            if self.catalog_dock is not None:
-                self.settings.setValue("workspace/catalog_visible", bool(self.catalog_dock.isVisible()))
-            if self.settings_dock is not None:
-                self.settings.setValue("workspace/settings_visible", bool(self.settings_dock.isVisible()))
-        except Exception:
-            pass
+        self.workspace_ui_controller.save_workspace_state()
 
     def _restore_last_directory(self):
         last_directory = self.settings.value("last_directory", "", type=str)
@@ -2286,65 +2259,16 @@ class MainWindow(QMainWindow):
         )
 
     def _on_index_scan_finished(self, summary: dict):
-        self._last_index_summary = summary
-        self._catalog_scan_text = (
-            f"Индекс: +{summary.get('new', 0)} ~{summary.get('updated', 0)} -{summary.get('removed', 0)} | {summary.get('duration_sec', 0)}s"
-        )
-        self._refresh_catalog_events()
-        self._sync_catalog_dialog_state()
-        self._append_index_status()
+        self.catalog_log_controller.on_index_scan_finished(summary)
 
     def _on_index_scan_failed(self, error_text: str):
-        self._last_index_summary = {"error": error_text}
-        self._catalog_scan_text = f"Индекс: ошибка ({error_text})"
-        self._refresh_catalog_events()
-        self._sync_catalog_dialog_state()
-        self._append_index_status()
+        self.catalog_log_controller.on_index_scan_failed(error_text)
 
     def _refresh_catalog_events(self):
-        if self.catalog_dialog_events_list is None:
-            return
-        self.catalog_dialog_events_list.clear()
-        events = get_recent_events(limit=120, db_path=self.catalog_db_path, root=self.current_directory or None)
-        if not events:
-            self.catalog_dialog_events_list.addItem("Событий нет")
-            return
-        for ev in events[:40]:
-            source_path = ev.get("source_path", "") or ""
-            etype = ev.get("event_type", "")
-            payload = {}
-            try:
-                payload = json.loads(ev.get("payload_json", "") or "{}")
-            except Exception:
-                payload = {}
-
-            if etype == "scan_completed":
-                root = payload.get("root", "")
-                seen = payload.get("seen", 0)
-                new_n = payload.get("new", 0)
-                upd_n = payload.get("updated", 0)
-                rem_n = payload.get("removed", 0)
-                created = (ev.get("created_at", "") or "").replace("T", " ")[:19]
-                self.catalog_dialog_events_list.addItem(
-                    f"{created} | scan_completed | seen={seen} +{new_n} ~{upd_n} -{rem_n} | {root}"
-                )
-                continue
-
-            if self.current_directory and source_path:
-                try:
-                    path = os.path.relpath(source_path, self.current_directory)
-                except Exception:
-                    path = source_path
-            else:
-                path = source_path or "<unknown>"
-            created = (ev.get("created_at", "") or "").replace("T", " ")[:19]
-            self.catalog_dialog_events_list.addItem(f"{created} | {etype} | {path}")
+        self.catalog_log_controller.refresh_catalog_events()
 
     def _scan_catalog_now(self):
-        if not self.current_directory:
-            self._set_status_text("Сначала выбери папку для сканирования.")
-            return
-        self._start_index_scan(self.current_directory)
+        self.catalog_log_controller.scan_catalog_now()
 
     def _on_filters_changed(self):
         self.catalog_ui_controller.on_filters_changed()
@@ -2450,18 +2374,7 @@ class MainWindow(QMainWindow):
             self.catalog_panel.set_favorite_button(is_fav)
 
     def _append_index_status(self):
-        if not self._last_index_summary:
-            return
-        base = self.status_label.text()
-        if " | Индекс:" in base:
-            base = base.split(" | Индекс:")[0]
-        summary = self._last_index_summary
-        if "error" in summary:
-            self._set_status_text(f"{base} | Индекс: ошибка ({summary['error']})")
-            return
-        self._set_status_text(
-            f"{base} | Индекс: +{summary.get('new', 0)} ~{summary.get('updated', 0)} -{summary.get('removed', 0)}"
-        )
+        self.catalog_log_controller.append_index_status()
 
     def _capture_model_preview(self, file_path: str, force: bool = False):
         if not file_path:
@@ -2576,75 +2489,22 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _show_catalog_dock(self):
-        if self.catalog_dock is None:
-            return
-        self.catalog_dock.show()
-        if self.catalog_dock.isFloating():
-            self.catalog_dock.setFloating(False)
-            self.addDockWidget(Qt.LeftDockWidgetArea, self.catalog_dock)
-        self.catalog_dock.raise_()
+        self.workspace_ui_controller.show_catalog_dock()
 
     def _show_settings_dock(self):
-        if self.settings_dock is None:
-            return
-        self.settings_dock.show()
-        if self.settings_dock.isFloating():
-            self.settings_dock.setFloating(False)
-            self.addDockWidget(Qt.RightDockWidgetArea, self.settings_dock)
-        self.settings_dock.raise_()
+        self.workspace_ui_controller.show_settings_dock()
 
     def _reset_workspace_layout(self):
-        if self.catalog_dock is not None:
-            self.catalog_dock.setFloating(False)
-            self.addDockWidget(Qt.LeftDockWidgetArea, self.catalog_dock)
-            self.catalog_dock.show()
-        if self.settings_dock is not None:
-            self.settings_dock.setFloating(False)
-            self.addDockWidget(Qt.RightDockWidgetArea, self.settings_dock)
-            self.settings_dock.show()
+        self.workspace_ui_controller.reset_workspace_layout()
 
     def _build_catalog_dialog(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Каталог моделей")
-        dialog.resize(760, 520)
-
-        layout = QVBoxLayout(dialog)
-        db_label = QLabel(dialog)
-        db_label.setWordWrap(True)
-        layout.addWidget(db_label)
-
-        scan_label = QLabel(dialog)
-        scan_label.setWordWrap(True)
-        layout.addWidget(scan_label)
-
-        scan_button = QPushButton("Сканировать каталог", dialog)
-        scan_button.clicked.connect(self._scan_catalog_now)
-        layout.addWidget(scan_button)
-
-        events_list = QListWidget(dialog)
-        layout.addWidget(events_list, stretch=1)
-
-        self.catalog_dialog = dialog
-        self.catalog_dialog_db_label = db_label
-        self.catalog_dialog_scan_label = scan_label
-        self.catalog_dialog_events_list = events_list
-        self._sync_catalog_dialog_state()
-        self._refresh_catalog_events()
+        self.catalog_log_controller.build_catalog_dialog()
 
     def _sync_catalog_dialog_state(self):
-        if self.catalog_dialog_db_label is not None:
-            self.catalog_dialog_db_label.setText(f"DB: {self.catalog_db_path}")
-        if self.catalog_dialog_scan_label is not None:
-            self.catalog_dialog_scan_label.setText(self._catalog_scan_text)
+        self.catalog_log_controller.sync_catalog_dialog_state()
 
     def _open_catalog_dialog(self):
-        if self.catalog_dialog is None:
-            self._build_catalog_dialog()
-        self._sync_catalog_dialog_state()
-        self._refresh_catalog_events()
-        self.catalog_dialog.show()
-        self.catalog_dialog.raise_()
-        self.catalog_dialog.activateWindow()
+        self.catalog_log_controller.open_catalog_dialog()
 
     def _confirm_heavy_model_load(self, file_path: str) -> bool:
         try:
