@@ -64,6 +64,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.gl_widget = OpenGLWidget(self)
+        self.gl_widget.on_key_azimuth_changed = self._on_key_azimuth_drag_from_viewport
         self.settings = QSettings("3d-viewer", "model-browser")
         self.catalog_db_path = init_catalog_db()
         self._settings_ready = False
@@ -1894,6 +1895,14 @@ class MainWindow(QMainWindow):
         self.gl_widget.set_fill_light_angles(self.fill_azimuth_slider.value(), value)
         if self._settings_ready:
             self.settings.setValue("view/fill_light_elevation", int(value))
+
+    def _on_key_azimuth_drag_from_viewport(self, azimuth_value: float):
+        value = int(round(float(azimuth_value)))
+        value = max(self.key_azimuth_slider.minimum(), min(self.key_azimuth_slider.maximum(), value))
+        if self.key_azimuth_slider.value() == value:
+            return
+        # Use normal slider path so label/settings/ui stay synchronized.
+        self.key_azimuth_slider.setValue(value)
 
     def _on_shadow_opacity_changed(self, value: int):
         opacity = value / 100.0

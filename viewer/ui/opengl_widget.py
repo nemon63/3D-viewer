@@ -436,6 +436,7 @@ class OpenGLWidget(QOpenGLWidget):
         self._inertia_damping = 0.92
         self._inertia_min_velocity = 0.01
         self._last_mouse_left_drag = False
+        self.on_key_azimuth_changed = None
 
         self.vertices = np.array([], dtype=np.float32)
         self.indices = np.array([], dtype=np.uint32)
@@ -1544,8 +1545,20 @@ class OpenGLWidget(QOpenGLWidget):
         if event.buttons() == Qt.MiddleButton:
             dx = event.x() - self.last_mouse_pos.x()
             rot_scale = self.rotate_speed * accel
-            # UX: MMB horizontal drag = camera azimuth (yaw) adjust.
-            self.angle_y = (self.angle_y - dx * rot_scale) % 360.0
+            if event.modifiers() & Qt.ShiftModifier:
+                # UX: Shift + MMB horizontal drag = key light azimuth.
+                delta = float(dx) * rot_scale
+                az = float(self.key_light_azimuth - delta)
+                while az > 180.0:
+                    az -= 360.0
+                while az < -180.0:
+                    az += 360.0
+                self.set_key_light_angles(az, self.key_light_elevation)
+                if callable(self.on_key_azimuth_changed):
+                    self.on_key_azimuth_changed(float(az))
+            else:
+                # UX: MMB horizontal drag = camera azimuth (yaw) adjust.
+                self.angle_y = (self.angle_y - dx * rot_scale) % 360.0
             self.last_mouse_pos = event.pos()
             self.update()
             return
