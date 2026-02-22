@@ -2,6 +2,7 @@ import os
 
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
 
+from viewer.loaders.model_loader import clear_payload_cache
 from viewer.utils.texture_utils import clear_texture_scan_cache
 
 
@@ -29,6 +30,7 @@ class DirectoryUiController:
     def reload_directory(self):
         w = self.w
         if w.current_directory:
+            clear_payload_cache()
             self.set_directory(w.current_directory)
 
     def set_directory(self, directory, auto_select_first=True):

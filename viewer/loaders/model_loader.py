@@ -24,6 +24,7 @@ from viewer.utils.texture_utils import (
     CHANNEL_NORMAL,
     CHANNEL_ORM,
     CHANNEL_ROUGHNESS,
+    texture_dirs_fingerprint,
     find_texture_candidates,
     group_texture_candidates,
     rank_texture_candidates,
@@ -81,23 +82,27 @@ def _texture_dirs_stamp(file_path: str) -> str:
         os.path.join(parent_dir, "Textures"),
         os.path.join(parent_dir, "textures"),
     ]
-    parts = []
-    seen = set()
-    for directory in search_dirs:
-        if not directory:
-            continue
-        norm = os.path.normcase(os.path.normpath(directory))
-        if norm in seen:
-            continue
-        seen.add(norm)
-        if not os.path.isdir(directory):
-            continue
-        try:
-            st = os.stat(directory)
-            parts.append(f"{norm}:{int(st.st_mtime_ns)}")
-        except OSError:
-            continue
-    return "|".join(parts)
+    return texture_dirs_fingerprint(search_dirs)
+
+
+def clear_payload_cache() -> int:
+    removed = 0
+    cache_dir = os.path.abspath(_PAYLOAD_CACHE_DIR)
+    if not os.path.isdir(cache_dir):
+        return removed
+    try:
+        for name in os.listdir(cache_dir):
+            if not str(name).lower().endswith(".pkl"):
+                continue
+            path = os.path.join(cache_dir, name)
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                continue
+    except OSError:
+        return removed
+    return removed
 
 
 def _try_load_payload_cache(file_path: str, fast_mode: bool, normals_policy: str, hard_angle_deg: float):
@@ -212,6 +217,7 @@ def _load_trimesh_payload(
 
         model_hint = os.path.splitext(os.path.basename(file_path))[0]
         texture_candidates = find_texture_candidates(file_path)
+        texture_candidates = [p for p in texture_candidates if p and os.path.isfile(p)]
         texture_sets = group_texture_candidates(texture_candidates)
         if not texture_sets.get(CHANNEL_BASECOLOR):
             model_stem = os.path.splitext(os.path.basename(file_path))[0].lower()
@@ -257,6 +263,7 @@ def _load_trimesh_payload(
     )
     model_hint = os.path.splitext(os.path.basename(file_path))[0]
     texture_candidates = find_texture_candidates(file_path)
+    texture_candidates = [p for p in texture_candidates if p and os.path.isfile(p)]
     texture_sets = group_texture_candidates(texture_candidates)
     if not texture_sets.get(CHANNEL_BASECOLOR):
         model_stem = os.path.splitext(os.path.basename(file_path))[0].lower()
@@ -732,8 +739,8 @@ def _load_fbx_payload(
     t_parse_start = time.perf_counter()
     try:
         model_dir = os.path.dirname(file_path)
-        pre_material_texture_candidates = _collect_fbx_material_textures(scene, file_path)
-        pre_fs_texture_candidates = find_texture_candidates(file_path)
+        pre_material_texture_candidates = [p for p in _collect_fbx_material_textures(scene, file_path) if p and os.path.isfile(p)]
+        pre_fs_texture_candidates = [p for p in find_texture_candidates(file_path) if p and os.path.isfile(p)]
         has_potential_textures = bool(pre_material_texture_candidates or pre_fs_texture_candidates)
         allow_smooth_fallback = str(normals_policy or "").lower() not in {
             NORMALS_POLICY_IMPORT,
@@ -804,11 +811,12 @@ def _load_fbx_payload(
             for paths in texture_sets.values():
                 texture_candidates.extend(paths)
 
-        if not texture_candidates:
-            texture_candidates = list(pre_material_texture_candidates)
-        if not texture_candidates:
-            texture_candidates = list(pre_fs_texture_candidates)
+        # Merge both sources: FBX-linked textures + filesystem discovery.
+        # FBX materials often miss PBR maps like *_met/_rgh even when files exist nearby.
+        texture_candidates.extend(pre_material_texture_candidates)
+        texture_candidates.extend(pre_fs_texture_candidates)
         texture_candidates = rank_texture_candidates(texture_candidates, model_name=os.path.splitext(os.path.basename(file_path))[0].lower())
+        texture_candidates = [p for p in texture_candidates if p and os.path.isfile(p)]
         texture_sets = group_texture_candidates(texture_candidates)
         if not texture_sets.get(CHANNEL_BASECOLOR):
             model_stem = os.path.splitext(os.path.basename(file_path))[0].lower()
@@ -1159,7 +1167,7 @@ def _collect_fbx_material_textures(scene, file_path: str):
                     abs_path = src_obj.GetFileName() or ""
                     rel_path = src_obj.GetRelativeFileName() or ""
                     resolved = resolve_texture_path(model_dir, abs_path, rel_path)
-                    if resolved is not None:
+                    if resolved is not None and _is_model_local_texture_path(resolved, model_dir):
                         candidates.append(resolved)
 
     model_name = os.path.splitext(os.path.basename(file_path))[0].lower()
@@ -1200,7 +1208,7 @@ def _collect_material_texture_sets(material, model_dir: str):
                 abs_path = src_obj.GetFileName() or ""
                 rel_path = src_obj.GetRelativeFileName() or ""
                 resolved = resolve_texture_path(model_dir, abs_path, rel_path)
-                if resolved is not None:
+                if resolved is not None and _is_model_local_texture_path(resolved, model_dir):
                     candidates.append(resolved)
         except Exception:
             continue
@@ -1210,6 +1218,32 @@ def _collect_material_texture_sets(material, model_dir: str):
     material_hint = hint_tokens[0] if hint_tokens else material_name
     ranked = rank_texture_candidates(candidates, model_name=material_hint)
     return group_texture_candidates(ranked)
+
+
+def _is_model_local_texture_path(path: str, model_dir: str) -> bool:
+    if not path:
+        return False
+    try:
+        ap = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+    except Exception:
+        return False
+    md = os.path.normcase(os.path.normpath(os.path.abspath(model_dir or "")))
+    if not md:
+        return False
+    parent = os.path.dirname(md)
+    allowed = [
+        md,
+        os.path.join(md, "Textures"),
+        os.path.join(md, "textures"),
+    ]
+    if parent and parent != md:
+        allowed.append(os.path.join(parent, "Textures"))
+        allowed.append(os.path.join(parent, "textures"))
+    for root in allowed:
+        nr = os.path.normcase(os.path.normpath(root))
+        if ap == nr or ap.startswith(nr + os.sep):
+            return True
+    return False
 
 
 def _safe_get_node_material(node, material_index: int):

@@ -1308,11 +1308,12 @@ class OpenGLWidget(QOpenGLWidget):
 
     def _get_fallback_texture_path(self, channel: str):
         direct = self.last_texture_paths.get(channel) or ""
-        if direct:
+        if direct and os.path.isfile(direct):
             return direct
         candidates = self.last_texture_sets.get(channel) or []
-        if candidates:
-            return candidates[0]
+        for path in candidates:
+            if path and os.path.isfile(path):
+                return path
         return ""
 
     def get_effective_texture_paths(self, material_uid: str = ""):

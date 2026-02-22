@@ -1,5 +1,6 @@
 import os
 import re
+import hashlib
 
 
 TEXTURE_EXTS = (".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff", ".exr", ".hdr")
@@ -190,13 +191,45 @@ def _texture_search_dirs(model_dir: str):
 
 
 def _texture_dirs_signature(search_dirs):
+    return texture_dirs_fingerprint(search_dirs)
+
+
+def texture_dirs_fingerprint(search_dirs):
     parts = []
     for directory in search_dirs:
         if not directory or not os.path.isdir(directory):
             continue
+        norm_dir = os.path.normcase(os.path.normpath(directory))
+        hasher = hashlib.sha1()
+        count = 0
+        try:
+            with os.scandir(directory) as entries:
+                rows = []
+                for entry in entries:
+                    if not entry.is_file():
+                        continue
+                    name = entry.name.lower()
+                    if not name.endswith(TEXTURE_EXTS):
+                        continue
+                    try:
+                        stf = entry.stat()
+                        rows.append((name, int(stf.st_size), int(stf.st_mtime_ns)))
+                    except OSError:
+                        rows.append((name, 0, 0))
+                rows.sort(key=lambda x: x[0])
+                for name, size, mtime_ns in rows:
+                    hasher.update(name.encode("utf-8", errors="ignore"))
+                    hasher.update(b"|")
+                    hasher.update(str(size).encode("ascii"))
+                    hasher.update(b"|")
+                    hasher.update(str(mtime_ns).encode("ascii"))
+                    hasher.update(b";")
+                    count += 1
+        except OSError:
+            continue
         try:
             st = os.stat(directory)
-            parts.append(f"{os.path.normcase(os.path.normpath(directory))}:{int(st.st_mtime_ns)}")
+            parts.append(f"{norm_dir}:{int(st.st_mtime_ns)}:{count}:{hasher.hexdigest()}")
         except OSError:
             continue
     return "|".join(parts)
@@ -325,19 +358,86 @@ def _scan_texture_files_recursive_shallow(directory: str, max_depth: int = 2, ma
 
 
 def resolve_texture_path(model_dir, abs_path, rel_path):
+    model_dir = os.path.abspath(model_dir or "")
+    search_dirs = [
+        model_dir,
+        os.path.join(model_dir, "Textures"),
+        os.path.join(model_dir, "textures"),
+    ]
+    parent = os.path.dirname(model_dir) if model_dir else ""
+    if parent and parent != model_dir:
+        search_dirs.append(os.path.join(parent, "Textures"))
+        search_dirs.append(os.path.join(parent, "textures"))
+    allowed_roots = []
+    for directory in search_dirs:
+        if directory and os.path.isdir(directory):
+            allowed_roots.append(os.path.normcase(os.path.normpath(os.path.abspath(directory))))
+
+    def _is_allowed_abs(path: str) -> bool:
+        if not path:
+            return False
+        try:
+            ap = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+        except Exception:
+            return False
+        for root in allowed_roots:
+            if ap == root or ap.startswith(root + os.sep):
+                return True
+        return False
+
     check_paths = []
-    if abs_path:
-        check_paths.append(abs_path)
-        check_paths.append(os.path.join(model_dir, os.path.basename(abs_path)))
-        check_paths.append(os.path.join(model_dir, "Textures", os.path.basename(abs_path)))
     if rel_path:
-        check_paths.append(rel_path)
         check_paths.append(os.path.join(model_dir, rel_path))
         check_paths.append(os.path.join(model_dir, os.path.basename(rel_path)))
         check_paths.append(os.path.join(model_dir, "Textures", os.path.basename(rel_path)))
+        check_paths.append(os.path.join(model_dir, "textures", os.path.basename(rel_path)))
+    if abs_path:
+        # Keep absolute path only when it belongs to the model-local texture roots.
+        if _is_allowed_abs(abs_path):
+            check_paths.append(abs_path)
+        check_paths.append(os.path.join(model_dir, os.path.basename(abs_path)))
+        check_paths.append(os.path.join(model_dir, "Textures", os.path.basename(abs_path)))
+        check_paths.append(os.path.join(model_dir, "textures", os.path.basename(abs_path)))
 
+    seen = set()
     for path in check_paths:
-        norm = os.path.normpath(path)
-        if os.path.isfile(norm):
-            return norm
+        if not path:
+            continue
+        norm = os.path.normcase(os.path.normpath(path))
+        if norm in seen:
+            continue
+        seen.add(norm)
+        if os.path.isfile(path):
+            return os.path.normpath(path)
+
+    # Rename fallback for legacy packs: if FBX points to stale filename,
+    # try to find the most relevant local texture by root token/channel.
+    requested = os.path.basename(rel_path or abs_path or "").strip()
+    if not requested:
+        return None
+    requested_channel = classify_texture_channel(requested)
+    requested_stem = os.path.splitext(requested.lower())[0]
+    root_tokens = [t for t in re.split(r"[^a-z0-9]+", requested_stem) if t]
+    root = root_tokens[0] if root_tokens else ""
+    if not root:
+        return None
+
+    pool = []
+    for directory in search_dirs:
+        if not directory or not os.path.isdir(directory):
+            continue
+        pool.extend(_scan_texture_files_non_recursive(directory))
+    if not pool:
+        return None
+
+    if requested_channel != CHANNEL_OTHER:
+        same_channel = [p for p in pool if classify_texture_channel(p) == requested_channel]
+        if same_channel:
+            pool = same_channel
+
+    ranked = rank_texture_candidates(pool, model_name=root)
+    for path in ranked:
+        stem = os.path.splitext(os.path.basename(path).lower())[0]
+        if stem == root or stem.startswith(f"{root}_") or stem.startswith(f"{root}-"):
+            return os.path.normpath(path)
     return None

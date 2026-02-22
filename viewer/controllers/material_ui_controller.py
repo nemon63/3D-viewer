@@ -4,6 +4,7 @@ import os
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QFileDialog
 
+from viewer.loaders.model_loader import clear_payload_cache
 from viewer.services.texture_sets import (
     build_texture_set_profiles,
     match_profile_key,
@@ -69,10 +70,25 @@ class MaterialUiController:
     def global_material_channel_states(self):
         return self.w.material_controller.global_material_channel_states(self.w.gl_widget)
 
+    def _is_roughness_derived_from_metal_alpha(self, texture_paths: dict) -> bool:
+        if not isinstance(texture_paths, dict):
+            return False
+        rough_path = str(texture_paths.get("roughness") or "")
+        if rough_path:
+            return False
+        metal_path = str(texture_paths.get("metal") or "")
+        if not metal_path:
+            return False
+        try:
+            return bool(self.w.gl_widget._texture_has_alpha_channel(metal_path))
+        except Exception:
+            return False
+
     def refresh_material_channel_controls(self):
         w = self.w
         material_uid = self.selected_material_uid()
         effective_paths, texture_sets = self.collect_effective_texture_channels(material_uid=material_uid)
+        roughness_derived = self._is_roughness_derived_from_metal_alpha(effective_paths)
         global_states = self.global_material_channel_states() if not material_uid else {}
         w._texture_set_profiles = build_texture_set_profiles(texture_sets or {})
         self.sync_texture_set_selection_from_current_channels(current_paths=effective_paths)
@@ -81,7 +97,8 @@ class MaterialUiController:
             combo = w.material_boxes[channel]
             combo.blockSignals(True)
             combo.clear()
-            combo.addItem("None", "")
+            none_label = "Auto from Metal Alpha (A)" if channel == "roughness" and roughness_derived else "None"
+            combo.addItem(none_label, "")
             if not material_uid and global_states.get(channel, {}).get("state") == "mixed":
                 combo.addItem("Mixed", "__mixed__")
             for path in texture_sets.get(channel, []):
@@ -103,6 +120,10 @@ class MaterialUiController:
                 combo.setCurrentIndex(matched)
             else:
                 combo.setCurrentIndex(0)
+            if channel == "roughness" and roughness_derived:
+                combo.setToolTip("Derived: roughness = 1 - metal alpha (Unity metallic/smoothness map).")
+            else:
+                combo.setToolTip("")
             combo.blockSignals(False)
         self.sync_texture_set_selection_from_current_channels()
         self.refresh_pipeline_status_labels()
@@ -331,6 +352,7 @@ class MaterialUiController:
             w._set_status_text("Нет активной модели для сброса overrides.")
             return
         clear_texture_scan_cache(os.path.dirname(file_path))
+        clear_payload_cache()
         w.material_controller.clear_texture_overrides(
             file_path=file_path,
             db_path=w.catalog_db_path,
@@ -378,6 +400,9 @@ class MaterialUiController:
         base_name = _name(tex_paths.get("basecolor", ""))
         metal_name = _name(tex_paths.get("metal", ""))
         rough_name = _name(tex_paths.get("roughness", ""))
+        roughness_derived = self._is_roughness_derived_from_metal_alpha(tex_paths)
+        rough_display = rough_name if rough_name != "-" else ("metal.A (inv)" if roughness_derived else "-")
+        rough_state = "ok" if rough_name != "-" else ("warn" if roughness_derived else "bad")
         normal_name = _name(tex_paths.get("normal", ""))
         normals_source = str(debug.get("normals_source", "unknown"))
         normals_policy = str(debug.get("normals_policy", "auto"))
@@ -398,7 +423,7 @@ class MaterialUiController:
             _line("Texture set", texture_set_label, "ok" if texture_set_label != "Custom" else "warn"),
             _line("Base", base_name, "ok" if base_name != "-" else "bad"),
             _line("Metal", metal_name, "ok" if metal_name != "-" else "bad"),
-            _line("Roughness", rough_name, "ok" if rough_name != "-" else "bad"),
+            _line("Roughness", rough_display, rough_state),
             _line("Normal", normal_name, "ok" if normal_name != "-" else "bad"),
             _line(
                 "Normals",
@@ -488,8 +513,10 @@ class MaterialUiController:
             return
 
         detected_rows = list(w.pipeline_coverage_rows or [])
+        detected_paths_for_hint = None
         if not detected_rows:
             texture_paths, texture_sets = self.collect_effective_texture_channels(material_uid="")
+            detected_paths_for_hint = texture_paths
             for candidate_path in (getattr(w.gl_widget, "last_texture_candidates", None) or []):
                 if not candidate_path:
                     continue
@@ -502,8 +529,12 @@ class MaterialUiController:
                 texture_sets,
                 material_rows=w.gl_widget.get_all_material_effective_textures(),
             )
+        if detected_paths_for_hint is None:
+            detected_paths_for_hint, _ = self.collect_effective_texture_channels(material_uid="")
         detected_best = self._pick_best_pipeline_row(detected_rows)
         detected_text, detected_color = self._format_pipeline_text(detected_best, all_rows=detected_rows)
+        if self._is_roughness_derived_from_metal_alpha(detected_paths_for_hint):
+            detected_text = f"{detected_text} | rough<-metal.A"
         detected_label.setText(detected_text)
         detected_label.setStyleSheet(f"color: {detected_color}; font-weight: 600;")
 
@@ -512,6 +543,8 @@ class MaterialUiController:
         applied_rows = evaluate_pipeline_coverage(w.profile_config, applied_paths, applied_sets)
         applied_best = self._pick_best_pipeline_row(applied_rows)
         applied_text, applied_color = self._format_pipeline_text(applied_best, all_rows=applied_rows)
+        if self._is_roughness_derived_from_metal_alpha(applied_paths):
+            applied_text = f"{applied_text} | rough<-metal.A"
         applied_label.setText(applied_text)
         applied_label.setStyleSheet(f"color: {applied_color}; font-weight: 600;")
 
