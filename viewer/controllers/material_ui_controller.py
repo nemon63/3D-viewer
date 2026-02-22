@@ -10,6 +10,7 @@ from viewer.services.texture_sets import (
     profile_by_key,
 )
 from viewer.services.pipeline_validation import evaluate_pipeline_coverage
+from viewer.utils.texture_utils import clear_texture_scan_cache
 
 
 class MaterialUiController:
@@ -329,6 +330,7 @@ class MaterialUiController:
         if not file_path:
             w._set_status_text("Нет активной модели для сброса overrides.")
             return
+        clear_texture_scan_cache(os.path.dirname(file_path))
         w.material_controller.clear_texture_overrides(
             file_path=file_path,
             db_path=w.catalog_db_path,

@@ -56,17 +56,48 @@ class MeshPayload:
 def _payload_cache_path(file_path: str, fast_mode: bool, normals_policy: str, hard_angle_deg: float) -> str:
     try:
         st = os.stat(file_path)
+        texture_stamp = _texture_dirs_stamp(file_path)
         identity = (
             f"{os.path.abspath(file_path)}|{st.st_size}|{st.st_mtime_ns}|{bool(fast_mode)}"
-            f"|{str(normals_policy or NORMALS_POLICY_AUTO)}|{float(hard_angle_deg or 0.0):.3f}|{_PAYLOAD_CACHE_VERSION}"
+            f"|{texture_stamp}|{str(normals_policy or NORMALS_POLICY_AUTO)}|{float(hard_angle_deg or 0.0):.3f}|{_PAYLOAD_CACHE_VERSION}"
         )
     except OSError:
+        texture_stamp = _texture_dirs_stamp(file_path)
         identity = (
             f"{os.path.abspath(file_path)}|{bool(fast_mode)}"
-            f"|{str(normals_policy or NORMALS_POLICY_AUTO)}|{float(hard_angle_deg or 0.0):.3f}|{_PAYLOAD_CACHE_VERSION}"
+            f"|{texture_stamp}|{str(normals_policy or NORMALS_POLICY_AUTO)}|{float(hard_angle_deg or 0.0):.3f}|{_PAYLOAD_CACHE_VERSION}"
         )
     key = hashlib.sha1(identity.encode("utf-8")).hexdigest()
     return os.path.join(_PAYLOAD_CACHE_DIR, f"{key}.pkl")
+
+
+def _texture_dirs_stamp(file_path: str) -> str:
+    model_dir = os.path.dirname(os.path.abspath(file_path))
+    parent_dir = os.path.dirname(model_dir)
+    search_dirs = [
+        model_dir,
+        os.path.join(model_dir, "Textures"),
+        os.path.join(model_dir, "textures"),
+        os.path.join(parent_dir, "Textures"),
+        os.path.join(parent_dir, "textures"),
+    ]
+    parts = []
+    seen = set()
+    for directory in search_dirs:
+        if not directory:
+            continue
+        norm = os.path.normcase(os.path.normpath(directory))
+        if norm in seen:
+            continue
+        seen.add(norm)
+        if not os.path.isdir(directory):
+            continue
+        try:
+            st = os.stat(directory)
+            parts.append(f"{norm}:{int(st.st_mtime_ns)}")
+        except OSError:
+            continue
+    return "|".join(parts)
 
 
 def _try_load_payload_cache(file_path: str, fast_mode: bool, normals_policy: str, hard_angle_deg: float):

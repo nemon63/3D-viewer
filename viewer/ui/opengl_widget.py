@@ -182,6 +182,8 @@ uniform int uAlphaMode;
 uniform int uUseBaseAlpha;
 uniform int uMetalChannel;
 uniform int uRoughChannel;
+uniform int uRoughFromMetalAlpha;
+uniform int uInvertRough;
 uniform int uFlipNormalY;
 uniform float uAlphaCutoff;
 uniform float uBlendOpacity;
@@ -311,7 +313,15 @@ void main() {
         }
     }
     float metallic = (uHasMetal == 1) ? sampleChannel(texture2D(uMetalTex, vUv), uMetalChannel) : 0.0;
-    float roughness = (uHasRough == 1) ? sampleChannel(texture2D(uRoughTex, vUv), uRoughChannel) : 0.55;
+    float roughness = 0.55;
+    if (uHasRough == 1) {
+        roughness = sampleChannel(texture2D(uRoughTex, vUv), uRoughChannel);
+    } else if (uRoughFromMetalAlpha == 1 && uHasMetal == 1) {
+        roughness = texture2D(uMetalTex, vUv).a;
+    }
+    if (uInvertRough == 1) {
+        roughness = 1.0 - roughness;
+    }
     roughness = clamp(roughness, 0.05, 1.0);
     metallic = clamp(metallic, 0.0, 1.0);
 
@@ -469,6 +479,7 @@ class OpenGLWidget(QOpenGLWidget):
         self.material_two_sided_overrides = {}
         self.texture_cache = {}
         self.texture_alpha_cache = {}
+        self.texture_alpha_channel_cache = {}
         self.base_texture_has_alpha = False
         self.last_texture_sets = {}
         self.last_texture_candidates = []
@@ -784,10 +795,7 @@ class OpenGLWidget(QOpenGLWidget):
                 }
                 base_path = str(global_paths.get(CHANNEL_BASE) or "")
                 has_alpha = bool(self.texture_alpha_cache.get(base_path, False))
-                swizzles = {
-                    "metal": self._default_channel_swizzle(CHANNEL_METAL, global_paths.get(CHANNEL_METAL, "")),
-                    "roughness": self._default_channel_swizzle(CHANNEL_ROUGH, global_paths.get(CHANNEL_ROUGH, "")),
-                }
+                swizzles = self._resolve_channel_swizzles({}, global_paths)
                 draw_entries.append((self.indices, tex_ids, has_alpha, swizzles, ""))
             elif self.submeshes:
                 for submesh in self.submeshes:
@@ -795,10 +803,7 @@ class OpenGLWidget(QOpenGLWidget):
                     draw_entries.append((submesh["indices"], tex_ids, has_alpha, swizzles, str(submesh.get("material_uid") or "")))
             else:
                 global_paths = self.get_effective_texture_paths()
-                swizzles = {
-                    "metal": self._default_channel_swizzle(CHANNEL_METAL, global_paths.get(CHANNEL_METAL, "")),
-                    "roughness": self._default_channel_swizzle(CHANNEL_ROUGH, global_paths.get(CHANNEL_ROUGH, "")),
-                }
+                swizzles = self._resolve_channel_swizzles({}, global_paths)
                 draw_entries.append((self.indices, self.texture_ids, self.base_texture_has_alpha, swizzles, ""))
 
             if self.alpha_render_mode == "blend":
@@ -963,6 +968,13 @@ class OpenGLWidget(QOpenGLWidget):
         swizzles = swizzles or {}
         self._set_int_uniform("uMetalChannel", int(swizzles.get("metal", 0)))
         self._set_int_uniform("uRoughChannel", int(swizzles.get("roughness", 0)))
+        use_metal_alpha_for_rough = int(swizzles.get("rough_from_metal_alpha", 0))
+        invert_rough = int(swizzles.get("invert_rough", 0))
+        if effective_fast_mode:
+            use_metal_alpha_for_rough = 0
+            invert_rough = 0
+        self._set_int_uniform("uRoughFromMetalAlpha", use_metal_alpha_for_rough)
+        self._set_int_uniform("uInvertRough", invert_rough)
         alpha_mode = 0
         use_base_alpha = 0
         if self.alpha_render_mode == "blend":
@@ -1229,6 +1241,35 @@ class OpenGLWidget(QOpenGLWidget):
         stem = os.path.splitext(os.path.basename(str(path).lower()))[0]
         return ("_orm" in stem) or stem.endswith("orm")
 
+    def _is_smoothness_texture_path(self, path: str) -> bool:
+        if not path:
+            return False
+        stem = os.path.splitext(os.path.basename(str(path).lower()))[0]
+        # If explicit rough token exists, treat it as roughness (no inversion).
+        if ("rough" in stem) or ("rgh" in stem):
+            return False
+        return ("smooth" in stem) or ("gloss" in stem) or ("gls" in stem)
+
+    def _texture_has_alpha_channel(self, path: str) -> bool:
+        if not path:
+            return False
+        key = os.path.normcase(os.path.normpath(str(path)))
+        cached = self.texture_alpha_channel_cache.get(key)
+        if cached is not None:
+            return bool(cached)
+        if Image is None or not os.path.isfile(path):
+            self.texture_alpha_channel_cache[key] = False
+            return False
+        try:
+            with Image.open(path) as img:
+                mode = str(getattr(img, "mode", "") or "").upper()
+                has_alpha = ("A" in mode) or ("transparency" in (getattr(img, "info", {}) or {}))
+                self.texture_alpha_channel_cache[key] = bool(has_alpha)
+                return bool(has_alpha)
+        except Exception:
+            self.texture_alpha_channel_cache[key] = False
+            return False
+
     def _default_channel_swizzle(self, channel: str, path: str) -> int:
         if self._is_orm_texture_path(path):
             if channel == CHANNEL_METAL:
@@ -1244,15 +1285,25 @@ class OpenGLWidget(QOpenGLWidget):
 
         metal_swizzle = self._default_channel_swizzle(CHANNEL_METAL, metal_path)
         rough_swizzle = self._default_channel_swizzle(CHANNEL_ROUGH, rough_path)
+        rough_from_metal_alpha = 0
+        invert_rough = 0
 
         if self._is_orm_texture_path(metal_path):
             metal_swizzle = int(explicit.get("metal", metal_swizzle))
         if self._is_orm_texture_path(rough_path):
             rough_swizzle = int(explicit.get("roughness", rough_swizzle))
+        if rough_path and self._is_smoothness_texture_path(rough_path):
+            invert_rough = 1
+        elif (not rough_path) and metal_path and self._texture_has_alpha_channel(metal_path):
+            # Unity metallic-smoothness map: R=metallic, A=smoothness.
+            rough_from_metal_alpha = 1
+            invert_rough = 1
 
         return {
             "metal": int(max(0, min(3, metal_swizzle))),
             "roughness": int(max(0, min(3, rough_swizzle))),
+            "rough_from_metal_alpha": int(rough_from_metal_alpha),
+            "invert_rough": int(invert_rough),
         }
 
     def _get_fallback_texture_path(self, channel: str):
@@ -1334,12 +1385,25 @@ class OpenGLWidget(QOpenGLWidget):
             with Image.open(path) as img:
                 image_copy = img.copy()
                 has_alpha = self._image_has_effective_alpha(image_copy)
+                has_alpha_channel = self._image_has_alpha_channel(image_copy)
                 texture_id = self._upload_texture_image(image_copy, old_texture_id=0, manage_context=False)
             self.texture_cache[path] = int(texture_id)
             self.texture_alpha_cache[path] = bool(has_alpha)
+            norm = os.path.normcase(os.path.normpath(path))
+            self.texture_alpha_channel_cache[path] = bool(has_alpha_channel)
+            self.texture_alpha_channel_cache[norm] = bool(has_alpha_channel)
             return int(texture_id)
         except Exception:
             return 0
+
+    def _image_has_alpha_channel(self, image_copy) -> bool:
+        if Image is None or image_copy is None:
+            return False
+        try:
+            mode = str(getattr(image_copy, "mode", "") or "").upper()
+            return ("A" in mode) or ("transparency" in (getattr(image_copy, "info", {}) or {}))
+        except Exception:
+            return False
 
     def _image_has_effective_alpha(self, image_copy) -> bool:
         if Image is None or image_copy is None:
@@ -1888,10 +1952,14 @@ class OpenGLWidget(QOpenGLWidget):
             with Image.open(path) as img:
                 image_copy = img.copy()
                 has_alpha = self._image_has_effective_alpha(image_copy)
+                has_alpha_channel = self._image_has_alpha_channel(image_copy)
                 texture_id = self._upload_texture_image(image_copy, old_texture_id=self.texture_ids[channel])
             self.texture_ids[channel] = texture_id
             self.last_texture_paths[channel] = path
             self.channel_overrides[channel] = path
+            norm = os.path.normcase(os.path.normpath(path))
+            self.texture_alpha_channel_cache[path] = bool(has_alpha_channel)
+            self.texture_alpha_channel_cache[norm] = bool(has_alpha_channel)
             if channel == CHANNEL_BASE:
                 self.last_texture_path = path
                 self.base_texture_has_alpha = has_alpha

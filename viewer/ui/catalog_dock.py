@@ -120,7 +120,14 @@ class CatalogDockPanel(QWidget):
     deleteCategoryRequested = pyqtSignal(int)
     assignPathToCategoryRequested = pyqtSignal(str, int)
     assignPathsToCategoryRequested = pyqtSignal(list, int)
+    setFavoriteForPathRequested = pyqtSignal(str, bool)
+    setFavoriteForPathsRequested = pyqtSignal(list, bool)
+    clearPathCategoriesRequested = pyqtSignal(str)
+    clearPathsCategoriesRequested = pyqtSignal(list)
+    removePathFromCategoryRequested = pyqtSignal(str, int)
     PREVIEW_PATH_ROLE = Qt.UserRole + 1
+    FAVORITE_ROLE = Qt.UserRole + 2
+    CATEGORY_COUNT_ROLE = Qt.UserRole + 3
     CATEGORY_ID_ROLE = Qt.UserRole + 10
 
     def __init__(self, parent=None):
@@ -272,6 +279,8 @@ class CatalogDockPanel(QWidget):
                 title = f"[new] {title}"
             item = QListWidgetItem(title)
             item.setData(Qt.UserRole, path)
+            item.setData(self.FAVORITE_ROLE, bool(is_favorite))
+            item.setData(self.CATEGORY_COUNT_ROLE, int(category_count))
             if category_count <= 0:
                 item.setToolTip(f"{rel_display}\nСтатус: без категории")
             else:
@@ -648,14 +657,39 @@ class CatalogDockPanel(QWidget):
         path = item.data(Qt.UserRole) or ""
         if not path:
             return
+        selected_paths = self.selected_paths()
+        if path not in selected_paths:
+            selected_paths = [path]
+        selected_count = len(selected_paths)
+        is_favorite = bool(item.data(self.FAVORITE_ROLE))
+        category_count = int(item.data(self.CATEGORY_COUNT_ROLE) or 0)
+        selected_category_id = self.selected_virtual_category_id()
 
         from PyQt5.QtWidgets import QMenu
 
         menu = QMenu(self)
         act_open = menu.addAction("Открыть в 3D")
         act_regen = menu.addAction("Сделать новое превью")
+        menu.addSeparator()
+        if is_favorite:
+            act_fav_single = menu.addAction("Убрать из избранного")
+            act_fav_multi = menu.addAction(f"Убрать выделенные из избранного ({selected_count})") if selected_count > 1 else None
+        else:
+            act_fav_single = menu.addAction("Добавить в избранное")
+            act_fav_multi = menu.addAction(f"Добавить выделенные в избранное ({selected_count})") if selected_count > 1 else None
+        menu.addSeparator()
         act_assign = menu.addAction("Назначить в выбранную категорию")
         act_assign_multi = menu.addAction("Назначить выделенные в выбранную категорию")
+        act_remove_current_category = menu.addAction("Убрать из выбранной категории")
+        if selected_category_id <= 0:
+            act_remove_current_category.setEnabled(False)
+        act_clear_categories = menu.addAction("Убрать из всех категорий")
+        act_clear_categories.setEnabled(category_count > 0)
+        act_clear_categories_multi = (
+            menu.addAction(f"Убрать выделенные из всех категорий ({selected_count})")
+            if selected_count > 1
+            else None
+        )
         act_folder = menu.addAction("Открыть папку")
         act_copy = menu.addAction("Копировать путь")
         chosen = menu.exec_(self.list_widget.mapToGlobal(pos))
@@ -663,12 +697,23 @@ class CatalogDockPanel(QWidget):
             self.openRequested.emit(path)
         elif chosen == act_regen:
             self.regeneratePreviewRequested.emit(path)
+        elif chosen == act_fav_single:
+            self.setFavoriteForPathRequested.emit(path, not is_favorite)
+        elif act_fav_multi is not None and chosen == act_fav_multi:
+            self.setFavoriteForPathsRequested.emit(selected_paths, not is_favorite)
         elif chosen == act_assign:
-            category_id = self.selected_virtual_category_id()
+            category_id = selected_category_id
             if category_id > 0:
                 self.assignPathToCategoryRequested.emit(path, category_id)
         elif chosen == act_assign_multi:
             self._assign_multi_selected_to_current_category()
+        elif chosen == act_remove_current_category:
+            if selected_category_id > 0:
+                self.removePathFromCategoryRequested.emit(path, selected_category_id)
+        elif chosen == act_clear_categories:
+            self.clearPathCategoriesRequested.emit(path)
+        elif act_clear_categories_multi is not None and chosen == act_clear_categories_multi:
+            self.clearPathsCategoriesRequested.emit(selected_paths)
         elif chosen == act_folder:
             self.openFolderRequested.emit(path)
         elif chosen == act_copy:

@@ -2,6 +2,8 @@ import os
 
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
 
+from viewer.utils.texture_utils import clear_texture_scan_cache
+
 
 class DirectoryUiController:
     def __init__(self, window):
@@ -31,6 +33,7 @@ class DirectoryUiController:
 
     def set_directory(self, directory, auto_select_first=True):
         w = self.w
+        clear_texture_scan_cache(directory)
         w.current_directory = directory
         w.settings.setValue("last_directory", directory)
         w.directory_label.setText(directory)

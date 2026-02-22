@@ -221,6 +221,36 @@ class CatalogViewController:
         w._apply_model_filters(keep_selection=True)
         w._refresh_catalog_events()
 
+    def set_favorite_for_path(self, file_path: str, is_favorite: bool):
+        w = self.w
+        if not file_path:
+            return
+        w.catalog_controller.set_favorite(
+            file_path=file_path,
+            is_favorite=bool(is_favorite),
+            favorite_paths=w.favorite_paths,
+            db_path=w.catalog_db_path,
+        )
+        self.update_favorite_button_for_current()
+        w._apply_model_filters(keep_selection=True)
+        w._refresh_catalog_events()
+
+    def set_favorite_for_paths(self, file_paths, is_favorite: bool):
+        w = self.w
+        paths = [p for p in (file_paths or []) if p]
+        if not paths:
+            return
+        for path in paths:
+            w.catalog_controller.set_favorite(
+                file_path=path,
+                is_favorite=bool(is_favorite),
+                favorite_paths=w.favorite_paths,
+                db_path=w.catalog_db_path,
+            )
+        self.update_favorite_button_for_current()
+        w._apply_model_filters(keep_selection=True)
+        w._refresh_catalog_events()
+
     def update_favorite_button_for_current(self):
         w = self.w
         path = self.current_selected_path()

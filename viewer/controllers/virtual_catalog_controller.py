@@ -2,10 +2,12 @@ import os
 from typing import Dict, Iterable, List, Set
 
 from viewer.services.catalog_db import (
+    clear_asset_categories,
     create_category,
     delete_category,
     get_asset_categories_map,
     get_categories_tree,
+    remove_asset_category,
     rename_category,
     set_asset_category,
 )
@@ -135,3 +137,30 @@ class VirtualCatalogController:
             if self.assign_path(file_path, cid, db_path=db_path):
                 assigned += 1
         return assigned
+
+    def clear_categories_for_path(self, file_path: str, db_path: str):
+        if not file_path:
+            return
+        clear_asset_categories(file_path, db_path=db_path)
+        self.asset_categories_map[self._norm_path(file_path)] = set()
+
+    def clear_categories_for_paths(self, file_paths: Iterable[str], db_path: str) -> int:
+        cleared = 0
+        for file_path in file_paths or []:
+            if not file_path:
+                continue
+            self.clear_categories_for_path(file_path, db_path=db_path)
+            cleared += 1
+        return cleared
+
+    def remove_path_from_category(self, file_path: str, category_id: int, db_path: str):
+        if not file_path:
+            return
+        cid = int(category_id or 0)
+        if cid <= 0:
+            return
+        remove_asset_category(file_path, cid, db_path=db_path)
+        norm = self._norm_path(file_path)
+        bucket = set(self.asset_categories_map.get(norm) or set())
+        bucket.discard(cid)
+        self.asset_categories_map[norm] = bucket

@@ -712,6 +712,11 @@ class MainWindow(QMainWindow):
         panel.deleteCategoryRequested.connect(self._on_delete_virtual_category_requested)
         panel.assignPathToCategoryRequested.connect(self._on_assign_path_to_virtual_category)
         panel.assignPathsToCategoryRequested.connect(self._on_assign_paths_to_virtual_category)
+        panel.setFavoriteForPathRequested.connect(self._set_favorite_for_path)
+        panel.setFavoriteForPathsRequested.connect(self._set_favorite_for_paths)
+        panel.clearPathCategoriesRequested.connect(self._on_clear_path_virtual_categories)
+        panel.clearPathsCategoriesRequested.connect(self._on_clear_paths_virtual_categories)
+        panel.removePathFromCategoryRequested.connect(self._on_remove_path_from_virtual_category)
         dock.setWidget(panel)
         self.addDockWidget(Qt.LeftDockWidgetArea, dock)
         dock.setFloating(False)
@@ -1291,6 +1296,15 @@ class MainWindow(QMainWindow):
     def _on_assign_paths_to_virtual_category(self, file_paths, category_id: int):
         self.catalog_ui_controller.on_assign_paths_to_virtual_category(file_paths, category_id)
 
+    def _on_remove_path_from_virtual_category(self, file_path: str, category_id: int):
+        self.catalog_ui_controller.on_remove_path_from_virtual_category(file_path, category_id)
+
+    def _on_clear_path_virtual_categories(self, file_path: str):
+        self.catalog_ui_controller.on_clear_path_virtual_categories(file_path)
+
+    def _on_clear_paths_virtual_categories(self, file_paths):
+        self.catalog_ui_controller.on_clear_paths_virtual_categories(file_paths)
+
     def _sync_filters_to_dock(self):
         self.catalog_ui_controller.sync_filters_to_dock()
 
@@ -1320,6 +1334,12 @@ class MainWindow(QMainWindow):
 
     def _toggle_current_favorite(self):
         self.catalog_view_controller.toggle_current_favorite()
+
+    def _set_favorite_for_path(self, file_path: str, is_favorite: bool):
+        self.catalog_view_controller.set_favorite_for_path(file_path, is_favorite)
+
+    def _set_favorite_for_paths(self, file_paths, is_favorite: bool):
+        self.catalog_view_controller.set_favorite_for_paths(file_paths, is_favorite)
 
     def _update_favorite_button_for_current(self):
         self.catalog_view_controller.update_favorite_button_for_current()

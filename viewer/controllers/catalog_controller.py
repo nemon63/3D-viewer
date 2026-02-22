@@ -58,6 +58,16 @@ class CatalogController:
         favorite_paths.add(norm)
         return True
 
+    def set_favorite(self, file_path: str, is_favorite: bool, favorite_paths: Set[str], db_path: str) -> bool:
+        norm = os.path.normcase(os.path.normpath(os.path.abspath(file_path)))
+        desired = bool(is_favorite)
+        set_asset_favorite(file_path, desired, db_path=db_path)
+        if desired:
+            favorite_paths.add(norm)
+        else:
+            favorite_paths.discard(norm)
+        return desired
+
     def build_dock_items(
         self,
         filtered_model_files: Sequence[str],

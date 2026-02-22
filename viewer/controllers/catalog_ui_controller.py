@@ -157,6 +157,57 @@ class CatalogUiController:
         self.apply_model_filters(keep_selection=True)
         w._set_status_text(f"Назначено в категорию: {assigned} моделей")
 
+    def on_remove_path_from_virtual_category(self, file_path: str, category_id: int):
+        w = self.w
+        cid = int(category_id or 0)
+        if not file_path or cid <= 0:
+            return
+        try:
+            w.virtual_catalog_controller.remove_path_from_category(
+                file_path=file_path,
+                category_id=cid,
+                db_path=w.catalog_db_path,
+            )
+        except Exception as exc:
+            w._set_status_text(f"Ошибка удаления из категории: {exc}")
+            return
+        w._refresh_catalog_events()
+        self.apply_model_filters(keep_selection=True)
+        w._set_status_text(f"Убрано из категории: {os.path.basename(file_path)}")
+
+    def on_clear_path_virtual_categories(self, file_path: str):
+        w = self.w
+        if not file_path:
+            return
+        try:
+            w.virtual_catalog_controller.clear_categories_for_path(
+                file_path=file_path,
+                db_path=w.catalog_db_path,
+            )
+        except Exception as exc:
+            w._set_status_text(f"Ошибка очистки категорий: {exc}")
+            return
+        w._refresh_catalog_events()
+        self.apply_model_filters(keep_selection=True)
+        w._set_status_text(f"Категории очищены: {os.path.basename(file_path)}")
+
+    def on_clear_paths_virtual_categories(self, file_paths):
+        w = self.w
+        paths = [p for p in (file_paths or []) if p]
+        if not paths:
+            return
+        try:
+            cleared = w.virtual_catalog_controller.clear_categories_for_paths(
+                file_paths=paths,
+                db_path=w.catalog_db_path,
+            )
+        except Exception as exc:
+            w._set_status_text(f"Ошибка очистки категорий: {exc}")
+            return
+        w._refresh_catalog_events()
+        self.apply_model_filters(keep_selection=True)
+        w._set_status_text(f"Категории очищены: {cleared} моделей")
+
     def sync_filters_to_dock(self):
         w = self.w
         if w.catalog_panel is None:

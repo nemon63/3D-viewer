@@ -20,6 +20,17 @@ CHANNEL_ORM = "orm"
 CHANNEL_OTHER = "other"
 
 
+def clear_texture_scan_cache(model_dir: str = ""):
+    if not model_dir:
+        _DIR_SCAN_CACHE.clear()
+        return
+    prefix = os.path.normcase(os.path.normpath(model_dir))
+    prefix = f"{prefix}|{_SCAN_CACHE_VERSION}|"
+    for key in list(_DIR_SCAN_CACHE.keys()):
+        if str(key).startswith(prefix):
+            _DIR_SCAN_CACHE.pop(key, None)
+
+
 def rank_texture_candidates(candidates, model_name=""):
     def score(path):
         name = os.path.basename(path).lower()
@@ -144,15 +155,13 @@ def find_texture_candidates(model_path):
 
 
 def _get_cached_texture_files(model_dir):
-    norm_model_dir = os.path.normcase(os.path.normpath(model_dir)) + "|" + _SCAN_CACHE_VERSION
-    if norm_model_dir in _DIR_SCAN_CACHE:
-        return list(_DIR_SCAN_CACHE[norm_model_dir])
+    search_dirs = _texture_search_dirs(model_dir)
+    norm_model_dir = os.path.normcase(os.path.normpath(model_dir))
+    signature = _texture_dirs_signature(search_dirs)
+    cache_key = f"{norm_model_dir}|{_SCAN_CACHE_VERSION}|{signature}"
+    if cache_key in _DIR_SCAN_CACHE:
+        return list(_DIR_SCAN_CACHE[cache_key])
 
-    search_dirs = [
-        model_dir,
-        os.path.join(model_dir, "Textures"),
-        os.path.join(model_dir, "textures"),
-    ]
     candidates = []
     for directory in search_dirs:
         if not os.path.isdir(directory):
@@ -160,7 +169,7 @@ def _get_cached_texture_files(model_dir):
         candidates.extend(_scan_texture_files_non_recursive(directory))
 
     if candidates:
-        _DIR_SCAN_CACHE[norm_model_dir] = list(candidates)
+        _DIR_SCAN_CACHE[cache_key] = list(candidates)
         return candidates
 
     for directory in search_dirs:
@@ -168,8 +177,29 @@ def _get_cached_texture_files(model_dir):
             continue
         candidates.extend(_scan_texture_files_recursive_limited(directory))
 
-    _DIR_SCAN_CACHE[norm_model_dir] = list(candidates)
+    _DIR_SCAN_CACHE[cache_key] = list(candidates)
     return candidates
+
+
+def _texture_search_dirs(model_dir: str):
+    return [
+        model_dir,
+        os.path.join(model_dir, "Textures"),
+        os.path.join(model_dir, "textures"),
+    ]
+
+
+def _texture_dirs_signature(search_dirs):
+    parts = []
+    for directory in search_dirs:
+        if not directory or not os.path.isdir(directory):
+            continue
+        try:
+            st = os.stat(directory)
+            parts.append(f"{os.path.normcase(os.path.normpath(directory))}:{int(st.st_mtime_ns)}")
+        except OSError:
+            continue
+    return "|".join(parts)
 
 
 def _find_named_textures(model_dir: str, model_name: str):

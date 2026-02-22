@@ -602,6 +602,90 @@ def set_asset_category(source_path: str, category_id=None, db_path=None, append=
         conn.close()
 
 
+def clear_asset_categories(source_path: str, db_path=None):
+    db_path = init_catalog_db(db_path)
+    if not source_path:
+        return
+    source_path = os.path.abspath(source_path)
+    now = _utc_now_iso()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA foreign_keys=ON;")
+        row = conn.execute("SELECT id FROM assets WHERE source_path=? LIMIT 1", (source_path,)).fetchone()
+        if row is None:
+            return
+        asset_id = int(row["id"])
+        conn.execute("DELETE FROM asset_category_links WHERE asset_id=?", (asset_id,))
+        conn.execute(
+            "UPDATE assets SET category_id=NULL, updated_at=?, last_seen_at=? WHERE id=?",
+            (now, now, asset_id),
+        )
+        _insert_event(
+            conn,
+            asset_id,
+            "asset_categories_cleared",
+            {"path": source_path},
+            now,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def remove_asset_category(source_path: str, category_id: int, db_path=None):
+    db_path = init_catalog_db(db_path)
+    if not source_path:
+        return
+    source_path = os.path.abspath(source_path)
+    cid = int(category_id or 0)
+    if cid <= 0:
+        return
+    now = _utc_now_iso()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA foreign_keys=ON;")
+        row = conn.execute(
+            "SELECT id, category_id FROM assets WHERE source_path=? LIMIT 1",
+            (source_path,),
+        ).fetchone()
+        if row is None:
+            return
+        asset_id = int(row["id"])
+        primary_id = (int(row["category_id"]) if row["category_id"] is not None else None)
+
+        conn.execute(
+            "DELETE FROM asset_category_links WHERE asset_id=? AND category_id=?",
+            (asset_id, cid),
+        )
+        if primary_id == cid:
+            replacement = conn.execute(
+                "SELECT category_id FROM asset_category_links WHERE asset_id=? ORDER BY id ASC LIMIT 1",
+                (asset_id,),
+            ).fetchone()
+            next_primary = int(replacement["category_id"]) if replacement is not None else None
+            conn.execute(
+                "UPDATE assets SET category_id=?, updated_at=?, last_seen_at=? WHERE id=?",
+                (next_primary, now, now, asset_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE assets SET updated_at=?, last_seen_at=? WHERE id=?",
+                (now, now, asset_id),
+            )
+        _insert_event(
+            conn,
+            asset_id,
+            "asset_category_removed",
+            {"path": source_path, "category_id": cid},
+            now,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_asset_category_map(source_paths, db_path=None):
     db_path = db_path or get_default_db_path()
     if not os.path.isfile(db_path) or not source_paths:
