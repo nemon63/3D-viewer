@@ -36,7 +36,7 @@ except ImportError:
     fbx = None
 
 
-_PAYLOAD_CACHE_VERSION = "v9"
+_PAYLOAD_CACHE_VERSION = "v10"
 _PAYLOAD_CACHE_DIR = os.path.join(".cache", "payload_cache")
 _SMOOTH_FALLBACK_MAX_POLYGONS = 250000
 
@@ -476,6 +476,17 @@ _CHANNEL_SUFFIX_TOKENS = {
     "occlusion",
 }
 
+_MATERIAL_FILLABLE_OUTPUT_CHANNELS = ("metal", "roughness", "normal", "ao", "emissive", "height", "mask_map")
+_MATERIAL_FILLABLE_SOURCE_CHANNELS = {
+    "metal": CHANNEL_METAL,
+    "roughness": CHANNEL_ROUGHNESS,
+    "normal": CHANNEL_NORMAL,
+    "ao": CHANNEL_AO,
+    "emissive": CHANNEL_EMISSIVE,
+    "height": CHANNEL_HEIGHT,
+    "mask_map": CHANNEL_MASK_MAP,
+}
+
 
 def _stem_family_key(path: str):
     if not path:
@@ -491,10 +502,61 @@ def _find_companion_texture(base_path: str, candidates):
     base_key = _stem_family_key(base_path)
     if not base_key:
         return ""
+    exact = []
     for path in candidates or []:
         if _stem_family_key(path) == base_key:
-            return path
+            exact.append(path)
+    if exact:
+        return exact[0]
+
+    # Soft match for legacy packs:
+    # body_muscle_4 + body_muscle_3_met -> use shared root only if unambiguous.
+    base_root = _family_root_key(base_key)
+    if not base_root:
+        return ""
+    root_matches = []
+    for path in candidates or []:
+        cand_root = _family_root_key(_stem_family_key(path))
+        if cand_root and cand_root == base_root:
+            root_matches.append(path)
+    if len(root_matches) == 1:
+        return root_matches[0]
     return ""
+
+
+def _family_root_key(family_key: str):
+    parts = [tok for tok in str(family_key or "").split("_") if tok]
+    while parts and parts[-1].isdigit():
+        parts.pop()
+    return "_".join(parts) if parts else str(family_key or "")
+
+
+def _shared_fill_channels_for_multimat(texture_sets: dict):
+    # Multi-material fallback safety:
+    # fill only channels that have a single unambiguous candidate across the model.
+    out = {"basecolor"}
+    for out_channel in _MATERIAL_FILLABLE_OUTPUT_CHANNELS:
+        src_channel = _MATERIAL_FILLABLE_SOURCE_CHANNELS.get(out_channel)
+        candidates = list((texture_sets or {}).get(src_channel) or [])
+        unique = {
+            os.path.normcase(os.path.normpath(str(p)))
+            for p in candidates
+            if p
+        }
+        if len(unique) == 1:
+            out.add(out_channel)
+
+    # ORM alone can safely seed metal/roughness if single and unambiguous.
+    orm_candidates = list((texture_sets or {}).get(CHANNEL_ORM) or [])
+    orm_unique = {
+        os.path.normcase(os.path.normpath(str(p)))
+        for p in orm_candidates
+        if p
+    }
+    if len(orm_unique) == 1:
+        out.add("metal")
+        out.add("roughness")
+    return out
 
 
 def _filter_texture_sets_by_hint(texture_sets: dict, hint_names=None):
@@ -725,9 +787,9 @@ def _load_fbx_payload(
         if submeshes:
             model_hint = os.path.splitext(os.path.basename(file_path))[0]
             # If scene uses a single material, fallback texture matching is safe for all PBR channels.
-            # For true multi-material scenes, only fill basecolor to avoid cross-material leakage.
+            # For true multi-material scenes use only unambiguous shared channels.
             fill_channels = (
-                {"basecolor"}
+                _shared_fill_channels_for_multimat(texture_sets)
                 if len(material_names) > 1
                 else {"basecolor", "metal", "roughness", "normal", "ao", "emissive", "height", "mask_map"}
             )

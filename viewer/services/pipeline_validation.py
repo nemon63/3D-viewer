@@ -3,9 +3,14 @@ import re
 from typing import Dict, List, Tuple
 
 from viewer.utils.texture_utils import (
+    CHANNEL_AO,
     CHANNEL_BASECOLOR,
+    CHANNEL_EMISSIVE,
+    CHANNEL_HEIGHT,
+    CHANNEL_MASK_MAP,
     CHANNEL_METAL,
     CHANNEL_NORMAL,
+    CHANNEL_ORM,
     CHANNEL_ROUGHNESS,
     classify_texture_channel,
 )
@@ -14,6 +19,8 @@ try:
     from PIL import Image
 except Exception:
     Image = None
+
+_ALPHA_CHANNEL_CACHE = {}
 
 
 def load_profiles_config(path: str = "") -> Tuple[dict, str]:
@@ -392,8 +399,8 @@ def _detect_channel_presence(texture_paths: dict, texture_sets: dict) -> Dict[st
         if paths:
             _mark_channel_presence(presence, str(ch).strip().lower())
 
-    names = [os.path.basename(p).lower() for p in _iter_texture_paths(texture_paths, texture_sets)]
-    for name in names:
+    for tex_path in _iter_texture_paths(texture_paths, texture_sets):
+        name = os.path.basename(tex_path).lower()
         guessed = classify_texture_channel(name)
         if guessed == CHANNEL_BASECOLOR:
             _mark_channel_presence(presence, "basecolor")
@@ -401,8 +408,22 @@ def _detect_channel_presence(texture_paths: dict, texture_sets: dict) -> Dict[st
             _mark_channel_presence(presence, "normal")
         elif guessed == CHANNEL_METAL:
             _mark_channel_presence(presence, "metal")
+            # Unity metallic maps often store Smoothness in alpha (R=Metal, A=Smoothness).
+            if _has_effective_alpha_channel(tex_path):
+                presence["smoothness"] = True
+                presence["gloss"] = True
         elif guessed == CHANNEL_ROUGHNESS:
             _mark_channel_presence(presence, "roughness")
+        elif guessed == CHANNEL_AO:
+            _mark_channel_presence(presence, "ao")
+        elif guessed == CHANNEL_EMISSIVE:
+            _mark_channel_presence(presence, "emissive")
+        elif guessed == CHANNEL_HEIGHT:
+            _mark_channel_presence(presence, "height")
+        elif guessed == CHANNEL_MASK_MAP:
+            _mark_channel_presence(presence, "mask_map")
+        elif guessed == CHANNEL_ORM:
+            _mark_channel_presence(presence, "orm")
 
         stem = os.path.splitext(name)[0]
         tokens = [tok for tok in re.split(r"[^a-z0-9]+", stem) if tok]
@@ -433,6 +454,23 @@ def _detect_channel_presence(texture_paths: dict, texture_sets: dict) -> Dict[st
         if "opacity" in stem or "_alpha" in stem or stem.endswith("_a"):
             presence["opacity"] = True
     return presence
+
+
+def _has_effective_alpha_channel(path: str) -> bool:
+    if not path or Image is None or not os.path.isfile(path):
+        return False
+    key = os.path.normcase(os.path.normpath(str(path)))
+    if key in _ALPHA_CHANNEL_CACHE:
+        return bool(_ALPHA_CHANNEL_CACHE[key])
+    try:
+        with Image.open(path) as img:
+            mode = str(getattr(img, "mode", "") or "").upper()
+            has_alpha = ("A" in mode) or ("transparency" in (getattr(img, "info", {}) or {}))
+            _ALPHA_CHANNEL_CACHE[key] = bool(has_alpha)
+            return bool(has_alpha)
+    except Exception:
+        _ALPHA_CHANNEL_CACHE[key] = False
+        return False
 
 
 def _mark_channel_presence(presence: dict, channel: str):
