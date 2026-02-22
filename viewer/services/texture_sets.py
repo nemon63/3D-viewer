@@ -2,13 +2,29 @@ import os
 import re
 
 
-TEXTURE_SET_CHANNELS = ("basecolor", "metal", "roughness", "normal")
+TEXTURE_SET_CHANNELS = (
+    "basecolor",
+    "metal",
+    "roughness",
+    "normal",
+    "ao",
+    "emissive",
+    "height",
+    "mask_map",
+    "orm",
+)
+TEXTURE_SET_CORE_CHANNELS = ("basecolor", "metal", "roughness", "normal")
 
 _CHANNEL_SUFFIX_TOKENS = {
     "basecolor": {"base", "basecolor", "base_color", "albedo", "diff", "dif", "diffuse", "color", "col"},
     "metal": {"metal", "met", "metallic", "metalness"},
     "roughness": {"rough", "roughness", "rgh", "gloss", "gls"},
     "normal": {"normal", "nrm", "nor", "nm", "nml", "normalmap"},
+    "ao": {"ao", "occlusion", "ambientocclusion"},
+    "emissive": {"emissive", "emission", "emiss", "emi"},
+    "height": {"height", "disp", "displace", "displacement", "hgt"},
+    "mask_map": {"mask", "maskmap", "mask_map", "detailmask", "detail_mask"},
+    "orm": {"orm"},
 }
 
 _ALL_SUFFIX_TOKENS = set()
@@ -40,30 +56,41 @@ def build_texture_set_profiles(texture_sets: dict):
             paths[channel] = _pick_best_channel_path(data["_candidates"][channel], key, channel)
         if not any(paths.values()):
             continue
-        coverage = sum(1 for ch in TEXTURE_SET_CHANNELS if paths.get(ch))
+        coverage = sum(1 for ch in TEXTURE_SET_CORE_CHANNELS if paths.get(ch))
+        extras = sum(1 for ch in TEXTURE_SET_CHANNELS if ch not in TEXTURE_SET_CORE_CHANNELS and paths.get(ch))
         label_name = _profile_display_name(key, paths)
         label = f"{label_name} ({coverage}/4)"
+        if extras > 0:
+            label += f" +{extras}"
         profiles.append(
             {
                 "key": key,
                 "label": label,
                 "paths": paths,
                 "coverage": coverage,
+                "extras": extras,
             }
         )
 
-    profiles.sort(key=lambda item: (-int(bool(item["paths"].get("basecolor"))), -int(item.get("coverage", 0)), _natural_key(item["key"])))
+    profiles.sort(
+        key=lambda item: (
+            -int(bool(item["paths"].get("basecolor"))),
+            -int(item.get("coverage", 0)),
+            -int(item.get("extras", 0)),
+            _natural_key(item["key"]),
+        )
+    )
     return profiles
 
 
 def match_profile_key(profiles, current_paths: dict) -> str:
     current_norm = {
         channel: _norm_path((current_paths or {}).get(channel, ""))
-        for channel in TEXTURE_SET_CHANNELS
+        for channel in TEXTURE_SET_CORE_CHANNELS
     }
     for profile in profiles or []:
         profile_paths = profile.get("paths") or {}
-        if all(_norm_path(profile_paths.get(channel, "")) == current_norm[channel] for channel in TEXTURE_SET_CHANNELS):
+        if all(_norm_path(profile_paths.get(channel, "")) == current_norm[channel] for channel in TEXTURE_SET_CORE_CHANNELS):
             return str(profile.get("key") or "")
     return ""
 

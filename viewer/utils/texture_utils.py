@@ -12,6 +12,10 @@ CHANNEL_BASECOLOR = "basecolor"
 CHANNEL_METAL = "metal"
 CHANNEL_ROUGHNESS = "roughness"
 CHANNEL_NORMAL = "normal"
+CHANNEL_AO = "ao"
+CHANNEL_EMISSIVE = "emissive"
+CHANNEL_HEIGHT = "height"
+CHANNEL_MASK_MAP = "mask_map"
 CHANNEL_ORM = "orm"
 CHANNEL_OTHER = "other"
 
@@ -41,9 +45,13 @@ def rank_texture_candidates(candidates, model_name=""):
             "occlusion",
             "height",
             "displace",
+            "emissive",
+            "emission",
             "opacity",
             "alpha",
             "gloss",
+            "mask_map",
+            "maskmap",
             "lut",
             "brdf",
             "ibl",
@@ -70,8 +78,17 @@ def classify_texture_channel(path: str) -> str:
     stem = os.path.splitext(name)[0]
     tokens = [t for t in re.split(r"[^a-z0-9]+", stem) if t]
     last_token = tokens[-1] if tokens else ""
+    token_set = set(tokens)
     if "_orm" in stem or stem.endswith("orm"):
         return CHANNEL_ORM
+    if "mask_map" in stem or "maskmap" in stem or ("mask" in token_set and ("detail" in token_set or "ao" in token_set)):
+        return CHANNEL_MASK_MAP
+    if any(token in name for token in ("_ao", "ambientocclusion", "occlusion")) or "ao" in token_set:
+        return CHANNEL_AO
+    if any(token in name for token in ("emissive", "emission", "_emiss", "_emi")):
+        return CHANNEL_EMISSIVE
+    if any(token in name for token in ("height", "displace", "_disp", "_hgt")):
+        return CHANNEL_HEIGHT
     if any(token in name for token in ("normal", "_nrm", "_nor", "_nm", "_nml", "normalmap")) or last_token in (
         "n",
         "nm",
@@ -101,6 +118,10 @@ def group_texture_candidates(candidates):
         CHANNEL_METAL: [],
         CHANNEL_ROUGHNESS: [],
         CHANNEL_NORMAL: [],
+        CHANNEL_AO: [],
+        CHANNEL_EMISSIVE: [],
+        CHANNEL_HEIGHT: [],
+        CHANNEL_MASK_MAP: [],
         CHANNEL_ORM: [],
         CHANNEL_OTHER: [],
     }

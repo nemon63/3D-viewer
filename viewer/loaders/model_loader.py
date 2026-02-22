@@ -15,7 +15,11 @@ from viewer.utils.geometry_utils import (
     process_mesh_data,
 )
 from viewer.utils.texture_utils import (
+    CHANNEL_AO,
     CHANNEL_BASECOLOR,
+    CHANNEL_EMISSIVE,
+    CHANNEL_HEIGHT,
+    CHANNEL_MASK_MAP,
     CHANNEL_METAL,
     CHANNEL_NORMAL,
     CHANNEL_ORM,
@@ -318,6 +322,10 @@ def _select_texture_paths(texture_sets: dict, hint_names=None):
     metal = _pick_best_texture_path(texture_sets.get(CHANNEL_METAL) or [], hint_names=hint_names)
     rough = _pick_best_texture_path(texture_sets.get(CHANNEL_ROUGHNESS) or [], hint_names=hint_names)
     normal = _pick_best_texture_path(texture_sets.get(CHANNEL_NORMAL) or [], hint_names=hint_names)
+    ao = _pick_best_texture_path(texture_sets.get(CHANNEL_AO) or [], hint_names=hint_names)
+    emissive = _pick_best_texture_path(texture_sets.get(CHANNEL_EMISSIVE) or [], hint_names=hint_names)
+    height = _pick_best_texture_path(texture_sets.get(CHANNEL_HEIGHT) or [], hint_names=hint_names)
+    mask_map = _pick_best_texture_path(texture_sets.get(CHANNEL_MASK_MAP) or [], hint_names=hint_names)
     orm = _pick_best_texture_path(texture_sets.get(CHANNEL_ORM) or [], hint_names=hint_names)
 
     # Unreal-style ORM packing: R=AO, G=Roughness, B=Metallic.
@@ -337,6 +345,10 @@ def _select_texture_paths(texture_sets: dict, hint_names=None):
         "metal": metal,
         "roughness": rough,
         "normal": normal,
+        "ao": ao,
+        "emissive": emissive,
+        "height": height,
+        "mask_map": mask_map,
         "orm": orm,
         "channel_swizzles": {
             "metal": int(metal_swizzle),
@@ -364,7 +376,7 @@ def _force_basecolor_match(texture_candidates, model_stem):
 def _merge_texture_paths(primary_paths: dict, fallback_sets: dict, hint_names=None, fill_missing_channels=None):
     merged = dict(primary_paths or {})
     if fill_missing_channels is None:
-        fill_missing_channels = {"basecolor", "metal", "roughness", "normal"}
+        fill_missing_channels = {"basecolor", "metal", "roughness", "normal", "ao", "emissive", "height", "mask_map"}
     else:
         fill_missing_channels = {str(ch) for ch in (fill_missing_channels or [])}
     channel_map = (
@@ -372,6 +384,10 @@ def _merge_texture_paths(primary_paths: dict, fallback_sets: dict, hint_names=No
         ("metal", CHANNEL_METAL),
         ("roughness", CHANNEL_ROUGHNESS),
         ("normal", CHANNEL_NORMAL),
+        ("ao", CHANNEL_AO),
+        ("emissive", CHANNEL_EMISSIVE),
+        ("height", CHANNEL_HEIGHT),
+        ("mask_map", CHANNEL_MASK_MAP),
     )
     for out_channel, fallback_channel in channel_map:
         if out_channel not in fill_missing_channels:
@@ -391,6 +407,14 @@ def _merge_texture_paths(primary_paths: dict, fallback_sets: dict, hint_names=No
             merged["roughness"] = _find_companion_texture(base_path, fallback_sets.get(CHANNEL_ROUGHNESS) or [])
         if not merged.get("normal"):
             merged["normal"] = _find_companion_texture(base_path, fallback_sets.get(CHANNEL_NORMAL) or [])
+        if not merged.get("ao"):
+            merged["ao"] = _find_companion_texture(base_path, fallback_sets.get(CHANNEL_AO) or [])
+        if not merged.get("emissive"):
+            merged["emissive"] = _find_companion_texture(base_path, fallback_sets.get(CHANNEL_EMISSIVE) or [])
+        if not merged.get("height"):
+            merged["height"] = _find_companion_texture(base_path, fallback_sets.get(CHANNEL_HEIGHT) or [])
+        if not merged.get("mask_map"):
+            merged["mask_map"] = _find_companion_texture(base_path, fallback_sets.get(CHANNEL_MASK_MAP) or [])
 
     orm_path = merged.get("orm")
     orm_fits_base = False
@@ -440,6 +464,14 @@ _CHANNEL_SUFFIX_TOKENS = {
     "normal",
     "nor",
     "ao",
+    "emissive",
+    "emission",
+    "height",
+    "disp",
+    "displace",
+    "mask",
+    "maskmap",
+    "mask_map",
     "orm",
     "occlusion",
 }
@@ -694,7 +726,11 @@ def _load_fbx_payload(
             model_hint = os.path.splitext(os.path.basename(file_path))[0]
             # If scene uses a single material, fallback texture matching is safe for all PBR channels.
             # For true multi-material scenes, only fill basecolor to avoid cross-material leakage.
-            fill_channels = {"basecolor"} if len(material_names) > 1 else {"basecolor", "metal", "roughness", "normal"}
+            fill_channels = (
+                {"basecolor"}
+                if len(material_names) > 1
+                else {"basecolor", "metal", "roughness", "normal", "ao", "emissive", "height", "mask_map"}
+            )
             for submesh in submeshes:
                 base_paths = submesh.get("texture_paths") or {}
                 filtered_fallback = _filter_texture_sets_by_hint(
@@ -1044,6 +1080,10 @@ def _collect_material_texture_sets(material, model_dir: str):
             "metal": [],
             "roughness": [],
             "normal": [],
+            "ao": [],
+            "emissive": [],
+            "height": [],
+            "mask_map": [],
             "orm": [],
             "other": [],
         }

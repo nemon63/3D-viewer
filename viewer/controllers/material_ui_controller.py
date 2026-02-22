@@ -9,6 +9,7 @@ from viewer.services.texture_sets import (
     match_profile_key,
     profile_by_key,
 )
+from viewer.services.pipeline_validation import evaluate_pipeline_coverage
 
 
 class MaterialUiController:
@@ -103,6 +104,7 @@ class MaterialUiController:
                 combo.setCurrentIndex(0)
             combo.blockSignals(False)
         self.sync_texture_set_selection_from_current_channels()
+        self.refresh_pipeline_status_labels()
 
     def on_texture_set_changed(self):
         w = self.w
@@ -260,7 +262,7 @@ class MaterialUiController:
             w,
             "Выберите текстуру",
             base_dir,
-            "Images (*.png *.jpg *.jpeg *.tga *.bmp *.tif *.tiff);;All files (*.*)",
+            "Images (*.png *.jpg *.jpeg *.tga *.bmp *.tif *.tiff *.exr *.hdr);;All files (*.*)",
         )
         if not file_path:
             return
@@ -419,6 +421,97 @@ class MaterialUiController:
             ),
         ]
         w.gl_widget.set_overlay_lines(lines)
+        self.refresh_pipeline_status_labels()
+
+    def _pipeline_status_style(self, status: str):
+        status_norm = str(status or "").strip().lower()
+        if status_norm == "ready":
+            return "Готово", "#7DDE92"
+        if status_norm == "partial":
+            return "Частично", "#F3C969"
+        if status_norm == "missing":
+            return "Отсутствует", "#FF9A9A"
+        return "Нет данных", "#A8B4C8"
+
+    def _pipeline_priority(self, pipeline_code: str) -> int:
+        order = {
+            "unreal": 500,
+            "unity_hdrp": 400,
+            "unity_urp": 300,
+            "unity_standard": 250,
+            "offline": 100,
+        }
+        return int(order.get(str(pipeline_code or "").strip().lower(), 0))
+
+    def _pick_best_pipeline_row(self, rows):
+        status_rank = {"ready": 3, "partial": 2, "missing": 1}
+        best = None
+        best_key = None
+        for row in rows or []:
+            status = str(row.get("status") or "").strip().lower()
+            key = (
+                status_rank.get(status, 0),
+                self._pipeline_priority(row.get("pipeline")),
+                int(len(row.get("required") or [])),
+                int(row.get("ready_required") or 0),
+                -int(len(row.get("missing") or [])),
+            )
+            if best is None or key > best_key:
+                best = row
+                best_key = key
+        return best
+
+    def _format_pipeline_text(self, row, all_rows=None):
+        if not row:
+            return "не определён", "#A8B4C8"
+        status_text, color = self._pipeline_status_style(row.get("status"))
+        title = str(row.get("title") or row.get("pipeline") or "unknown")
+        ready_count = sum(1 for item in (all_rows or []) if str(item.get("status") or "").strip().lower() == "ready")
+        if ready_count > 1 and str(row.get("status") or "").strip().lower() == "ready":
+            return f"{title} ({status_text}, +{ready_count - 1} готово)", color
+        return f"{title} ({status_text})", color
+
+    def refresh_pipeline_status_labels(self):
+        w = self.w
+        detected_label = getattr(w, "material_pipeline_detected_label", None)
+        applied_label = getattr(w, "material_pipeline_applied_label", None)
+        if detected_label is None or applied_label is None:
+            return
+        active_path = w.current_file_path or w._current_selected_path() or ""
+        if not active_path:
+            detected_label.setText("нет данных")
+            applied_label.setText("нет данных")
+            detected_label.setStyleSheet("color: #A8B4C8;")
+            applied_label.setStyleSheet("color: #A8B4C8;")
+            return
+
+        detected_rows = list(w.pipeline_coverage_rows or [])
+        if not detected_rows:
+            texture_paths, texture_sets = self.collect_effective_texture_channels(material_uid="")
+            for candidate_path in (getattr(w.gl_widget, "last_texture_candidates", None) or []):
+                if not candidate_path:
+                    continue
+                bucket = texture_sets.setdefault("__all_candidates__", [])
+                if candidate_path not in bucket:
+                    bucket.append(candidate_path)
+            detected_rows = evaluate_pipeline_coverage(
+                w.profile_config,
+                texture_paths,
+                texture_sets,
+                material_rows=w.gl_widget.get_all_material_effective_textures(),
+            )
+        detected_best = self._pick_best_pipeline_row(detected_rows)
+        detected_text, detected_color = self._format_pipeline_text(detected_best, all_rows=detected_rows)
+        detected_label.setText(detected_text)
+        detected_label.setStyleSheet(f"color: {detected_color}; font-weight: 600;")
+
+        material_uid = self.selected_material_uid()
+        applied_paths, applied_sets = self.collect_effective_texture_channels(material_uid=material_uid)
+        applied_rows = evaluate_pipeline_coverage(w.profile_config, applied_paths, applied_sets)
+        applied_best = self._pick_best_pipeline_row(applied_rows)
+        applied_text, applied_color = self._format_pipeline_text(applied_best, all_rows=applied_rows)
+        applied_label.setText(applied_text)
+        applied_label.setStyleSheet(f"color: {applied_color}; font-weight: 600;")
 
     def update_status(self, row):
         w = self.w

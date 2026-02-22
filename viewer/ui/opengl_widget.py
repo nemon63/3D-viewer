@@ -113,7 +113,23 @@ CHANNEL_BASE = "basecolor"
 CHANNEL_METAL = "metal"
 CHANNEL_ROUGH = "roughness"
 CHANNEL_NORMAL = "normal"
-ALL_CHANNELS = (CHANNEL_BASE, CHANNEL_METAL, CHANNEL_ROUGH, CHANNEL_NORMAL)
+CHANNEL_AO = "ao"
+CHANNEL_EMISSIVE = "emissive"
+CHANNEL_HEIGHT = "height"
+CHANNEL_MASK_MAP = "mask_map"
+CHANNEL_ORM = "orm"
+ALL_CHANNELS = (
+    CHANNEL_BASE,
+    CHANNEL_METAL,
+    CHANNEL_ROUGH,
+    CHANNEL_NORMAL,
+    CHANNEL_AO,
+    CHANNEL_EMISSIVE,
+    CHANNEL_HEIGHT,
+    CHANNEL_MASK_MAP,
+    CHANNEL_ORM,
+)
+SHADER_CHANNELS = (CHANNEL_BASE, CHANNEL_METAL, CHANNEL_ROUGH, CHANNEL_NORMAL)
 
 
 VERTEX_SHADER_SRC = """
@@ -1199,7 +1215,9 @@ class OpenGLWidget(QOpenGLWidget):
                 path = texture_paths.get(ch) or self.last_texture_paths.get(ch) or self._get_fallback_texture_path(ch)
             resolved[ch] = path or ""
 
-        texture_ids = {ch: self._get_or_create_texture_id(resolved[ch]) for ch in ALL_CHANNELS}
+        texture_ids = {ch: 0 for ch in ALL_CHANNELS}
+        for ch in SHADER_CHANNELS:
+            texture_ids[ch] = self._get_or_create_texture_id(resolved[ch])
         base_path = resolved.get(CHANNEL_BASE, "")
         has_alpha = bool(self.texture_alpha_cache.get(base_path, False))
         swizzles = self._resolve_channel_swizzles(submesh, resolved)
@@ -1832,7 +1850,7 @@ class OpenGLWidget(QOpenGLWidget):
     def apply_texture_path(self, channel: str, path: str, material_uid: str = "") -> bool:
         if channel not in ALL_CHANNELS:
             return False
-        if Image is None:
+        if Image is None and channel in SHADER_CHANNELS:
             return False
         material_uid = str(material_uid or "").strip()
 
@@ -1844,9 +1862,10 @@ class OpenGLWidget(QOpenGLWidget):
                 return True
             if not os.path.isfile(path):
                 return False
-            tex_id = self._get_or_create_texture_id(path)
-            if not tex_id:
-                return False
+            if channel in SHADER_CHANNELS:
+                tex_id = self._get_or_create_texture_id(path)
+                if not tex_id:
+                    return False
             overrides[channel] = path
             self.update()
             return True
@@ -1858,6 +1877,12 @@ class OpenGLWidget(QOpenGLWidget):
             return True
         if not os.path.isfile(path):
             return False
+
+        if channel not in SHADER_CHANNELS:
+            self.last_texture_paths[channel] = path
+            self.channel_overrides[channel] = path
+            self.update()
+            return True
 
         try:
             with Image.open(path) as img:

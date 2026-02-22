@@ -71,6 +71,11 @@ class MainWindow(QMainWindow):
             ("metal", "Metal"),
             ("roughness", "Roughness"),
             ("normal", "Normal"),
+            ("ao", "AO/Occlusion"),
+            ("emissive", "Emissive"),
+            ("height", "Height/Displace"),
+            ("mask_map", "Mask Map (HDRP)"),
+            ("orm", "ORM (Unreal)"),
         ]
         self.material_boxes = {}
         self.material_target_combo = None
@@ -254,6 +259,12 @@ class MainWindow(QMainWindow):
         self.texture_set_combo.addItem("Custom", "__custom__")
         self.texture_set_combo.currentIndexChanged.connect(self._on_texture_set_changed)
         material_target_layout.addRow("Texture Set", self.texture_set_combo)
+        self.material_pipeline_detected_label = QLabel("нет данных", self)
+        self.material_pipeline_detected_label.setWordWrap(True)
+        self.material_pipeline_applied_label = QLabel("нет данных", self)
+        self.material_pipeline_applied_label.setWordWrap(True)
+        material_target_layout.addRow("Обнаружен", self.material_pipeline_detected_label)
+        material_target_layout.addRow("Применён", self.material_pipeline_applied_label)
         material_root.addWidget(material_target_group)
 
         material_channels_group = QGroupBox("Channels", self)
@@ -820,6 +831,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_validation_data(self, file_path: str = ""):
         self.validation_controller.refresh_validation_data(file_path=file_path)
+        self.material_ui_controller.refresh_pipeline_status_labels()
 
     def _render_validation_panel(self):
         self.validation_controller.render_validation_panel()
