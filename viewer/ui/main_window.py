@@ -5,16 +5,13 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDockWidget,
-    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QMainWindow,
     QPushButton,
-    QShortcut,
     QSlider,
     QTabWidget,
     QTreeWidget,
@@ -33,9 +30,11 @@ from viewer.controllers.catalog_log_controller import CatalogLogController
 from viewer.controllers.catalog_ui_controller import CatalogUiController
 from viewer.controllers.catalog_view_controller import CatalogViewController
 from viewer.controllers.directory_scan_controller import DirectoryScanController
+from viewer.controllers.directory_ui_controller import DirectoryUiController
 from viewer.controllers.material_controller import MaterialController
 from viewer.controllers.material_ui_controller import MaterialUiController
 from viewer.controllers.model_session_controller import ModelSessionController
+from viewer.controllers.navigation_ui_controller import NavigationUiController
 from viewer.controllers.preview_ui_controller import PreviewUiController
 from viewer.controllers.render_settings_controller import RenderSettingsController
 from viewer.controllers.validation_controller import ValidationController
@@ -105,6 +104,8 @@ class MainWindow(QMainWindow):
         self.catalog_log_controller = CatalogLogController(self)
         self.catalog_ui_controller = CatalogUiController(self)
         self.catalog_view_controller = CatalogViewController(self)
+        self.directory_ui_controller = DirectoryUiController(self)
+        self.navigation_ui_controller = NavigationUiController(self)
         self.preview_ui_controller = PreviewUiController(self)
         self.render_settings_controller = RenderSettingsController(self)
         self.validation_controller = ValidationController(self)
@@ -940,90 +941,25 @@ class MainWindow(QMainWindow):
         self.workspace_ui_controller.save_workspace_state()
 
     def _restore_last_directory(self):
-        last_directory = self.settings.value("last_directory", "", type=str)
-        if last_directory and os.path.isdir(last_directory):
-            # Safe startup: don't auto-load the first model from previous session.
-            self.set_directory(last_directory, auto_select_first=False)
+        self.directory_ui_controller.restore_last_directory()
 
     def choose_directory(self):
-        directory = QFileDialog.getExistingDirectory(self, "Выбери папку с моделями", self.current_directory or os.getcwd())
-        if directory:
-            self.set_directory(directory)
+        self.directory_ui_controller.choose_directory()
 
     def reload_directory(self):
-        if self.current_directory:
-            self.set_directory(self.current_directory)
+        self.directory_ui_controller.reload_directory()
 
     def set_directory(self, directory, auto_select_first=True):
-        self.current_directory = directory
-        self.settings.setValue("last_directory", directory)
-        self.directory_label.setText(directory)
-        self.open_catalog_panel_button.setToolTip(f"Каталог: {directory}")
-        self.model_files = []
-        self.filtered_model_files = []
-        self._model_item_by_path = {}
-        self.current_file_path = ""
-        self._selected_model_path = ""
-        self.model_list.clear()
-        self._refresh_catalog_dock_items(preview_map_raw={})
-        self._sync_filters_to_dock()
-        self._refresh_validation_data()
-        self.virtual_catalog_controller.clear_asset_map()
-        self._set_status_text("Scanning models...")
-        self._start_directory_scan(directory, auto_select_first=auto_select_first)
-        self.batch_controller.restore_state(self.current_directory, self._thumb_size)
+        self.directory_ui_controller.set_directory(directory, auto_select_first=auto_select_first)
 
     def _start_directory_scan(self, directory: str, auto_select_first: bool):
-        self.directory_scan_controller.start(
-            directory=directory,
-            model_extensions=self.model_extensions,
-            auto_select_first=bool(auto_select_first),
-        )
+        self.directory_ui_controller.start_directory_scan(directory, auto_select_first=auto_select_first)
 
     def _on_directory_scan_finished(self, request_id: int, directory: str, files, auto_select_first: bool):
-        if request_id != self.directory_scan_controller.request_id:
-            return
-        if directory != self.current_directory:
-            return
-
-        self.model_files = list(files or [])
-        self._populate_category_filter()
-        self.category_combo.blockSignals(True)
-        try:
-            self._restore_category_filter(self._pending_category_filter)
-        finally:
-            self.category_combo.blockSignals(False)
-        self._refresh_favorites_from_db()
-        self._refresh_asset_category_map()
-        self._apply_model_filters(keep_selection=False)
-        self._start_index_scan(directory, scanned_paths=self.model_files)
-
-        if not self.filtered_model_files:
-            self.current_file_path = ""
-            self._refresh_validation_data()
-            self._set_status_text("No supported models in selected folder.")
-            return
-
-        if auto_select_first:
-            self._select_model_by_index(0)
-        else:
-            self.model_list.clearSelection()
-            self._set_status_text(
-                f"Found models: {len(self.filtered_model_files)}. Auto-load disabled, choose a model manually."
-            )
-            return
-
-        self._set_status_text(f"Found models: {len(self.filtered_model_files)}")
+        self.directory_ui_controller.on_directory_scan_finished(request_id, directory, files, auto_select_first)
 
     def _on_directory_scan_failed(self, request_id: int, error_text: str):
-        if request_id != self.directory_scan_controller.request_id:
-            return
-        self.model_files = []
-        self.filtered_model_files = []
-        self._model_item_by_path = {}
-        self.model_list.clear()
-        self._refresh_catalog_dock_items(preview_map_raw={})
-        self._set_status_text(f"Directory scan failed: {error_text}")
+        self.directory_ui_controller.on_directory_scan_failed(request_id, error_text)
 
     def _top_category(self, file_path: str) -> str:
         return self.catalog_view_controller.top_category(file_path)
@@ -1041,12 +977,7 @@ class MainWindow(QMainWindow):
         self.catalog_view_controller.refresh_catalog_dock_items(preview_map_raw=preview_map_raw)
 
     def _load_model_at_row(self, row):
-        if row < 0 or row >= len(self.filtered_model_files):
-            return
-        file_path = self.filtered_model_files[row]
-        if (not self.batch_controller.running) and (not self._confirm_heavy_model_load(file_path)):
-            return
-        self._start_async_model_load(row, file_path)
+        self.directory_ui_controller.load_model_at_row(row)
 
     def _current_selected_path(self):
         return self.catalog_view_controller.current_selected_path()
@@ -1070,78 +1001,24 @@ class MainWindow(QMainWindow):
         self.catalog_view_controller.show_next_model()
 
     def keyPressEvent(self, event):
-        key_mappings = {
-            Qt.Key_Left: (0, -5),
-            Qt.Key_Right: (0, 5),
-            Qt.Key_Up: (-5, 0),
-            Qt.Key_Down: (5, 0),
-        }
-
-        if event.key() in key_mappings:
-            dx, dy = key_mappings[event.key()]
-            speed = self.gl_widget.rotate_speed
-            self.gl_widget.set_angle(self.gl_widget.angle_x + dx * speed, self.gl_widget.angle_y + dy * speed)
+        if self.navigation_ui_controller.handle_key_press(event):
             return
-
         super().keyPressEvent(event)
 
     def _register_shortcuts(self):
-        # Use WindowShortcut so actions work even when focus is inside list/widgets.
-        self.shortcut_prev_pg = QShortcut(Qt.Key_PageUp, self)
-        self.shortcut_prev_pg.setContext(Qt.WindowShortcut)
-        self.shortcut_prev_pg.activated.connect(self.show_previous_model)
-
-        self.shortcut_next_pg = QShortcut(Qt.Key_PageDown, self)
-        self.shortcut_next_pg.setContext(Qt.WindowShortcut)
-        self.shortcut_next_pg.activated.connect(self.show_next_model)
-
-        self.shortcut_prev_a = QShortcut(Qt.Key_A, self)
-        self.shortcut_prev_a.setContext(Qt.WindowShortcut)
-        self.shortcut_prev_a.activated.connect(self.show_previous_model)
-
-        self.shortcut_next_d = QShortcut(Qt.Key_D, self)
-        self.shortcut_next_d.setContext(Qt.WindowShortcut)
-        self.shortcut_next_d.activated.connect(self.show_next_model)
-
-        self.shortcut_fit = QShortcut(Qt.Key_F, self)
-        self.shortcut_fit.setContext(Qt.WindowShortcut)
-        self.shortcut_fit.activated.connect(self.gl_widget.fit_model)
-
-        self.shortcut_reset = QShortcut(Qt.Key_R, self)
-        self.shortcut_reset.setContext(Qt.WindowShortcut)
-        self.shortcut_reset.activated.connect(self._reset_view_action)
-
-        self.shortcut_projection = QShortcut(Qt.Key_P, self)
-        self.shortcut_projection.setContext(Qt.WindowShortcut)
-        self.shortcut_projection.activated.connect(self._toggle_projection_action)
-
-        self.shortcut_lit = QShortcut(Qt.Key_L, self)
-        self.shortcut_lit.setContext(Qt.WindowShortcut)
-        self.shortcut_lit.activated.connect(self._toggle_lit_action)
-
-        self.shortcut_overlay = QShortcut(Qt.Key_F1, self)
-        self.shortcut_overlay.setContext(Qt.WindowShortcut)
-        self.shortcut_overlay.activated.connect(self._toggle_overlay_action)
+        self.navigation_ui_controller.register_shortcuts()
 
     def _reset_view_action(self):
-        self.gl_widget.reset_view()
-        self._sync_projection_combo()
-        self._update_status(self._current_model_index())
+        self.navigation_ui_controller.reset_view_action()
 
     def _toggle_projection_action(self):
-        self.gl_widget.toggle_projection_mode()
-        self._sync_projection_combo()
-        self._update_status(self._current_model_index())
+        self.navigation_ui_controller.toggle_projection_action()
 
     def _toggle_lit_action(self):
-        self.gl_widget.unlit_texture_preview = not self.gl_widget.unlit_texture_preview
-        self._update_status(self._current_model_index())
-        self.gl_widget.update()
+        self.navigation_ui_controller.toggle_lit_action()
 
     def _toggle_overlay_action(self):
-        visible = self.gl_widget.toggle_overlay()
-        state = "ON" if visible else "OFF"
-        self.statusBar().showMessage(f"Overlay: {state}", 1500)
+        self.navigation_ui_controller.toggle_overlay_action()
 
     def _populate_material_controls(self, texture_sets):
         self.material_ui_controller.populate_material_controls(texture_sets)
@@ -1480,25 +1357,5 @@ class MainWindow(QMainWindow):
         self.catalog_log_controller.open_catalog_dialog()
 
     def _confirm_heavy_model_load(self, file_path: str) -> bool:
-        try:
-            size_bytes = os.path.getsize(file_path)
-        except OSError:
-            return True
-
-        size_mb = size_bytes / (1024 * 1024)
-        if size_mb < self.HEAVY_FILE_SIZE_MB:
-            return True
-
-        answer = QMessageBox.question(
-            self,
-            "Тяжёлая модель",
-            (
-                f"Файл очень большой: {size_mb:.1f} MB\n"
-                "Загрузка может зависнуть на слабом CPU/GPU.\n\n"
-                "Продолжить загрузку?"
-            ),
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        return answer == QMessageBox.Yes
+        return self.directory_ui_controller.confirm_heavy_model_load(file_path)
 

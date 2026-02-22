@@ -7,9 +7,11 @@ from viewer.controllers.catalog_log_controller import CatalogLogController
 from viewer.controllers.catalog_ui_controller import CatalogUiController
 from viewer.controllers.catalog_view_controller import CatalogViewController
 from viewer.controllers.directory_scan_controller import DirectoryScanController
+from viewer.controllers.directory_ui_controller import DirectoryUiController
 from viewer.controllers.material_controller import MaterialController
 from viewer.controllers.material_ui_controller import MaterialUiController
 from viewer.controllers.model_session_controller import ModelSessionController
+from viewer.controllers.navigation_ui_controller import NavigationUiController
 from viewer.controllers.preview_ui_controller import PreviewUiController
 from viewer.controllers.render_settings_controller import RenderSettingsController
 from viewer.controllers.validation_controller import ValidationController
@@ -24,9 +26,11 @@ __all__ = [
     "CatalogUiController",
     "CatalogViewController",
     "DirectoryScanController",
+    "DirectoryUiController",
     "MaterialController",
     "MaterialUiController",
     "ModelSessionController",
+    "NavigationUiController",
     "PreviewUiController",
     "RenderSettingsController",
     "ValidationController",
