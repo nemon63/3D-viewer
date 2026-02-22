@@ -50,6 +50,15 @@ class ValidationController:
                 bucket = texture_sets.setdefault(str(channel), [])
                 if path not in bucket:
                     bucket.append(path)
+        # Include all discovered texture candidates, not only currently assigned channels.
+        # This keeps validation accurate for packed maps (ORM/MaskMap), AO/height/emissive
+        # that may be present on disk but not bound in the current 4-channel viewport shader.
+        for candidate_path in (getattr(w.gl_widget, "last_texture_candidates", None) or []):
+            if not candidate_path:
+                continue
+            bucket = texture_sets.setdefault("__all_candidates__", [])
+            if candidate_path not in bucket:
+                bucket.append(candidate_path)
         debug = w.gl_widget.last_debug_info or {}
         triangles = int(w.gl_widget.indices.size // 3) if w.gl_widget.indices.size else 0
 

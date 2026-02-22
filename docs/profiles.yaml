@@ -1,8 +1,19 @@
 version: 1
 pipelines:
   unity_urp:
-    required_channels: [basecolor, normal]
-    optional_channels: [metal, roughness, ao, emissive, opacity]
+    required_channels: [basecolor, normal, metallic, smoothness]
+    optional_channels: [ao, emissive, opacity, height]
+    packed_maps:
+      - name: metallic_smoothness
+        channels:
+          R: metallic
+          A: smoothness
+  unity_standard:
+    required_channels: [basecolor, normal, metallic, smoothness]
+    optional_channels: [ao, emissive, opacity, height]
+  unity_hdrp:
+    required_channels: [basecolor, normal, mask_map]
+    optional_channels: [height, emissive, opacity, detail_mask]
     packed_maps:
       - name: mask_map
         channels:
@@ -10,15 +21,9 @@ pipelines:
           G: occlusion
           B: detail_mask
           A: smoothness
-  unity_standard:
-    required_channels: [basecolor]
-    optional_channels: [normal, metallic, roughness, ao, emissive, opacity]
-  unity_hdrp:
-    required_channels: [basecolor, normal, mask_map]
-    optional_channels: [height, emissive, opacity]
   unreal:
-    required_channels: [basecolor, normal]
-    optional_channels: [orm, roughness, metallic, ao, emissive, opacity]
+    required_channels: [basecolor, normal, orm]
+    optional_channels: [roughness, metallic, ao, emissive, opacity]
     packed_maps:
       - name: orm
         channels:
@@ -26,8 +31,8 @@ pipelines:
           G: roughness
           B: metallic
   offline:
-    required_channels: [basecolor]
-    optional_channels: [normal, roughness, metallic, specular, displacement, opacity, emissive]
+    required_channels: [basecolor, normal, roughness, metallic]
+    optional_channels: [specular, displacement, opacity, emissive, ao, height]
 
 validation:
   naming:

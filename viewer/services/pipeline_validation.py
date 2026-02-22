@@ -42,7 +42,8 @@ def evaluate_pipeline_coverage(profile_cfg: dict, texture_paths: dict, texture_s
         material_missing = []
         if material_presence:
             for material in material_presence:
-                material_row_missing = [ch for ch in required if not _is_channel_present(ch, material["presence"])]
+                effective_presence = _combined_presence(material.get("presence") or {}, presence)
+                material_row_missing = [ch for ch in required if not _is_channel_present(ch, effective_presence)]
                 if material_row_missing:
                     material_missing.append(
                         {
@@ -147,9 +148,12 @@ def run_validation_checks(
             }
         )
 
+    global_presence = _detect_channel_presence(texture_paths or {}, texture_sets or {})
+
     for row in coverage_rows or []:
         missing = row.get("missing") or []
         material_missing = row.get("material_missing") or []
+        pipeline_code = str(row.get("pipeline") or "global")
         if missing:
             if material_missing:
                 top = []
@@ -165,7 +169,7 @@ def run_validation_checks(
             results.append(
                 {
                     "severity": "error",
-                    "pipeline": row.get("pipeline") or "global",
+                    "pipeline": pipeline_code,
                     "rule_code": "pipeline.required_channels",
                     "message": message,
                 }
@@ -179,11 +183,20 @@ def run_validation_checks(
             results.append(
                 {
                     "severity": "info",
-                    "pipeline": row.get("pipeline") or "global",
+                    "pipeline": pipeline_code,
                     "rule_code": "pipeline.required_channels",
                     "message": message,
                 }
             )
+            for note in _pipeline_derivation_notes(pipeline_code, global_presence):
+                results.append(
+                    {
+                        "severity": note.get("severity") or "info",
+                        "pipeline": pipeline_code,
+                        "rule_code": "pipeline.derived_channels",
+                        "message": str(note.get("message") or ""),
+                    }
+                )
 
     tex_pattern = str(naming.get("texture_pattern") or "").strip()
     allowed_tex_formats = [str(x).lower() for x in (formats.get("texture") or [])]
@@ -357,10 +370,17 @@ def _detect_channel_presence(texture_paths: dict, texture_sets: dict) -> Dict[st
         "metallic": False,
         "roughness": False,
         "rough": False,
+        "smoothness": False,
+        "gloss": False,
         "ao": False,
         "occlusion": False,
+        "emissive": False,
+        "emission": False,
+        "height": False,
+        "displacement": False,
         "opacity": False,
         "mask_map": False,
+        "detail_mask": False,
         "orm": False,
     }
 
@@ -385,6 +405,8 @@ def _detect_channel_presence(texture_paths: dict, texture_sets: dict) -> Dict[st
             _mark_channel_presence(presence, "roughness")
 
         stem = os.path.splitext(name)[0]
+        tokens = [tok for tok in re.split(r"[^a-z0-9]+", stem) if tok]
+        token_set = set(tokens)
         if "_orm" in stem or stem.endswith("orm"):
             presence["orm"] = True
             presence["ao"] = True
@@ -392,11 +414,22 @@ def _detect_channel_presence(texture_paths: dict, texture_sets: dict) -> Dict[st
             presence["roughness"] = True
             presence["metal"] = True
             presence["metallic"] = True
+        if "smooth" in stem or "gloss" in stem:
+            presence["smoothness"] = True
+            presence["gloss"] = True
         if "mask" in stem:
             presence["mask_map"] = True
+        if ("detail" in token_set and "mask" in token_set) or "detailmask" in stem or "detail_mask" in stem:
+            presence["detail_mask"] = True
         if "_ao" in stem or "occlusion" in stem:
             presence["ao"] = True
             presence["occlusion"] = True
+        if "emissive" in stem or "emission" in stem or "emiss" in stem:
+            presence["emissive"] = True
+            presence["emission"] = True
+        if "height" in stem or "displace" in stem or ("disp" in token_set):
+            presence["height"] = True
+            presence["displacement"] = True
         if "opacity" in stem or "_alpha" in stem or stem.endswith("_a"):
             presence["opacity"] = True
     return presence
@@ -404,7 +437,7 @@ def _detect_channel_presence(texture_paths: dict, texture_sets: dict) -> Dict[st
 
 def _mark_channel_presence(presence: dict, channel: str):
     key = str(channel or "").strip().lower()
-    if not key:
+    if (not key) or key.startswith("__"):
         return
     alias_map = {
         "base": "basecolor",
@@ -416,9 +449,21 @@ def _mark_channel_presence(presence: dict, channel: str):
         "nrm": "normal",
         "nor": "normal",
         "metalness": "metal",
+        "metallic": "metal",
         "met": "metal",
         "rough": "roughness",
         "rgh": "roughness",
+        "gloss": "smoothness",
+        "gls": "smoothness",
+        "smooth": "smoothness",
+        "smoothness": "smoothness",
+        "emission": "emissive",
+        "emit": "emissive",
+        "disp": "height",
+        "displace": "height",
+        "displacement": "height",
+        "detailmask": "detail_mask",
+        "detail_mask": "detail_mask",
     }
     key = alias_map.get(key, key)
     presence[key] = True
@@ -429,25 +474,115 @@ def _mark_channel_presence(presence: dict, channel: str):
         presence["metallic"] = True
     if key == "roughness":
         presence["rough"] = True
+    if key == "smoothness":
+        presence["gloss"] = True
+    if key == "emissive":
+        presence["emission"] = True
+    if key == "height":
+        presence["displacement"] = True
+    if key == "orm":
+        presence["ao"] = True
+        presence["occlusion"] = True
+        presence["roughness"] = True
+        presence["rough"] = True
+        presence["metal"] = True
+        presence["metallic"] = True
+    if key == "mask_map":
+        presence["metal"] = True
+        presence["metallic"] = True
+        presence["ao"] = True
+        presence["occlusion"] = True
+        presence["smoothness"] = True
+        presence["gloss"] = True
     if key == "ao":
         presence["occlusion"] = True
 
 
 def _is_channel_present(channel: str, presence: dict) -> bool:
     ch = str(channel).strip().lower()
+    if ch == "orm":
+        return bool(presence.get("orm")) or _has_orm_components(presence)
+    if ch == "mask_map":
+        return bool(presence.get("mask_map")) or _has_mask_map_components(presence)
+    if ch in ("smoothness", "gloss"):
+        return bool(presence.get("smoothness") or presence.get("gloss") or presence.get("roughness") or presence.get("rough"))
+    if ch in ("emissive", "emission"):
+        return bool(presence.get("emissive") or presence.get("emission"))
+    if ch in ("height", "displacement"):
+        return bool(presence.get("height") or presence.get("displacement"))
     aliases = {
         "basecolor": ("basecolor", "diffuse", "albedo"),
         "diffuse": ("diffuse", "basecolor", "albedo"),
         "albedo": ("albedo", "basecolor", "diffuse"),
         "roughness": ("roughness", "rough"),
         "rough": ("rough", "roughness"),
+        "smoothness": ("smoothness", "gloss", "roughness", "rough"),
+        "gloss": ("gloss", "smoothness", "roughness", "rough"),
         "metallic": ("metallic", "metal"),
         "metal": ("metal", "metallic"),
         "occlusion": ("occlusion", "ao"),
         "ao": ("ao", "occlusion"),
+        "emissive": ("emissive", "emission"),
+        "emission": ("emission", "emissive"),
+        "height": ("height", "displacement"),
+        "displacement": ("displacement", "height"),
+        "detail_mask": ("detail_mask",),
     }
     keys = aliases.get(ch, (ch,))
     return any(bool(presence.get(k)) for k in keys)
+
+
+def _has_orm_components(presence: dict) -> bool:
+    has_occ = bool(presence.get("occlusion") or presence.get("ao"))
+    has_rough = bool(presence.get("roughness") or presence.get("rough"))
+    has_metal = bool(presence.get("metallic") or presence.get("metal"))
+    return has_occ and has_rough and has_metal
+
+
+def _has_mask_map_components(presence: dict) -> bool:
+    has_occ = bool(presence.get("occlusion") or presence.get("ao"))
+    has_metal = bool(presence.get("metallic") or presence.get("metal"))
+    has_smooth = bool(presence.get("smoothness") or presence.get("gloss") or presence.get("roughness") or presence.get("rough"))
+    return has_occ and has_metal and has_smooth
+
+
+def _combined_presence(primary: dict, fallback: dict) -> dict:
+    out = {}
+    for key in set((primary or {}).keys()) | set((fallback or {}).keys()):
+        out[key] = bool((primary or {}).get(key)) or bool((fallback or {}).get(key))
+    return out
+
+
+def _pipeline_derivation_notes(pipeline_code: str, presence: dict) -> List[dict]:
+    pipe = str(pipeline_code or "").strip().lower()
+    notes = []
+
+    if pipe == "unreal":
+        if not bool(presence.get("orm")) and _has_orm_components(presence):
+            notes.append(
+                {
+                    "severity": "warn",
+                    "message": "ORM texture is not packed yet; it can be generated from AO + Roughness + Metallic.",
+                }
+            )
+    elif pipe == "unity_hdrp":
+        if not bool(presence.get("mask_map")) and _has_mask_map_components(presence):
+            notes.append(
+                {
+                    "severity": "warn",
+                    "message": "HDRP Mask Map is missing; it can be generated from Metallic + AO + Smoothness (or Roughness inversion).",
+                }
+            )
+    elif pipe in ("unity_urp", "unity_standard"):
+        has_smooth_explicit = bool(presence.get("smoothness") or presence.get("gloss"))
+        if (not has_smooth_explicit) and bool(presence.get("roughness") or presence.get("rough")):
+            notes.append(
+                {
+                    "severity": "info",
+                    "message": "Smoothness map is not explicit; it can be derived from Roughness (Smoothness = 1 - Roughness).",
+                }
+            )
+    return notes
 
 
 def _parse_simple_yaml(text: str):

@@ -455,6 +455,7 @@ class OpenGLWidget(QOpenGLWidget):
         self.texture_alpha_cache = {}
         self.base_texture_has_alpha = False
         self.last_texture_sets = {}
+        self.last_texture_candidates = []
         self.submeshes = []
         self.last_debug_info = {}
         self.last_error = ""
@@ -608,6 +609,7 @@ class OpenGLWidget(QOpenGLWidget):
             self.texcoords = np.array([], dtype=np.float32)
             self.last_texture_path = ""
             self.last_texture_sets = {}
+            self.last_texture_candidates = []
             self.submeshes = []
             self.material_channel_overrides = {}
             self.material_two_sided_overrides = {}
@@ -627,6 +629,7 @@ class OpenGLWidget(QOpenGLWidget):
             self.normals = payload.normals
             self.texcoords = payload.texcoords
             self.last_texture_sets = payload.texture_sets or {}
+            self.last_texture_candidates = list(payload.texture_candidates or [])
             self.submeshes = payload.submeshes or []
             self.last_debug_info = payload.debug_info or {}
             self.last_texture_path = ""
@@ -660,6 +663,7 @@ class OpenGLWidget(QOpenGLWidget):
             self.texcoords = np.array([], dtype=np.float32)
             self.last_texture_path = ""
             self.last_texture_sets = {}
+            self.last_texture_candidates = []
             self.submeshes = []
             self.material_channel_overrides = {}
             self.material_two_sided_overrides = {}

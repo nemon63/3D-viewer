@@ -2,7 +2,7 @@ import os
 import re
 
 
-TEXTURE_EXTS = (".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff")
+TEXTURE_EXTS = (".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff", ".exr", ".hdr")
 _DIR_SCAN_CACHE = {}
 _SCAN_CACHE_VERSION = "v6"
 _MAX_TEXTURE_SCAN_FILES = 20000
